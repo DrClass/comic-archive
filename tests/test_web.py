@@ -501,6 +501,55 @@ def test_anonymous_users_only_see_login(tmp_path: Path):
     assert "Example Artist" not in login.text
 
 
+
+
+def test_anonymous_protected_request_preserves_login_csrf(tmp_path: Path):
+    database, library, _ = _make_library(tmp_path)
+    client = TestClient(create_app(database, library))
+
+    first_token = _csrf_token(client, login=True)
+    protected = client.get("/health", follow_redirects=False)
+    assert protected.status_code == 303
+    assert protected.headers["location"] == "/login"
+
+    second_token = _csrf_token(client, login=True)
+    assert second_token == first_token
+
+
+def test_favicon_does_not_rotate_login_csrf_and_secure_login_succeeds(tmp_path: Path):
+    database, library, _ = _make_library(tmp_path)
+    create_user(database, "reader", "reader-password-123", is_admin=False)
+    client = TestClient(
+        create_app(database, library, secure_cookies=True),
+        base_url="https://comics.example.test",
+    )
+
+    login_page = client.get("/login")
+    match = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text)
+    assert match, login_page.text
+    token = match.group(1)
+
+    favicon = client.get("/favicon.ico", follow_redirects=False)
+    assert favicon.status_code == 204
+
+    after_favicon = client.get("/login")
+    after_match = re.search(r'name="csrf_token" value="([^"]+)"', after_favicon.text)
+    assert after_match, after_favicon.text
+    assert after_match.group(1) == token
+
+    login = client.post(
+        "/login",
+        data={
+            "csrf_token": token,
+            "username": "reader",
+            "password": "reader-password-123",
+        },
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    assert login.headers["location"] == "/"
+
+
 def test_regular_user_can_read_but_not_administer(tmp_path: Path):
     database, library, result = _make_library(tmp_path)
     create_user(database, "reader", "reader-password-123", is_admin=False)

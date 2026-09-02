@@ -462,3 +462,8 @@ This is file-level resumability, not byte-range resumability inside one file. If
 The previous whole-folder `/import/upload` and `/import/bulk/upload` endpoints remain for backward compatibility, but the normal web interface no longer uses them.
 
 For reverse-proxy deployment, request-body limits now generally need to accommodate the **largest individual file** being imported rather than an entire artist folder in one request.
+
+## Milestone 22.1 — production login CSRF fix
+
+Fixed a production-only login failure exposed by browser background requests such as `/favicon.ico`. Anonymous requests to protected paths now preserve the existing session CSRF token instead of clearing the session and generating a new token while the login form is open. Invalid/stale authenticated sessions still have authentication state cleared, but their existing CSRF token is preserved when possible. `/favicon.ico` now returns HTTP 204 without entering the authentication redirect flow. Regression coverage includes secure cookies over an HTTPS TestClient, favicon access between login GET and POST, and anonymous protected requests preserving the login CSRF token.
+

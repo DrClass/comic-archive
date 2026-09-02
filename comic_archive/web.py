@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.datastructures import UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -707,17 +707,27 @@ def create_app(
             request.session["csrf_token"] = secrets.token_urlsafe(32)
 
         path = request.url.path
-        if path == "/login":
+        if path in {"/login", "/favicon.ico"}:
             return await call_next(request)
 
         user_id = request.session.get("user_id")
-        user = get_user(database, user_id) if user_id else None
+        if not user_id:
+            # Anonymous requests to protected paths must not rotate the CSRF
+            # token. Browsers can make background requests (for example, a
+            # favicon request) while the login form is open; rotating here
+            # would make the already-rendered login form immediately stale.
+            return RedirectResponse("/login", status_code=303)
+
+        user = get_user(database, user_id)
         if (
             user is None
-            or request.session.get("session_version") != (user.session_version if user else None)
+            or request.session.get("session_version") != user.session_version
         ):
+            # Clear invalid authentication state while preserving the current
+            # anonymous CSRF token so the subsequent login form remains valid.
+            csrf_token = request.session.get("csrf_token") or secrets.token_urlsafe(32)
             request.session.clear()
-            request.session["csrf_token"] = secrets.token_urlsafe(32)
+            request.session["csrf_token"] = csrf_token
             return RedirectResponse("/login", status_code=303)
 
         request.state.user = user
@@ -755,6 +765,12 @@ def create_app(
         if admin_only and not user.is_admin:
             return HTMLResponse("Administrator access required", status_code=403)
         return await call_next(request)
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        # Avoid redirecting the browser's automatic favicon request through
+        # the authentication flow. A real favicon can replace this later.
+        return Response(status_code=204)
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
