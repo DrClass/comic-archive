@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Choose import folder - Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="{{ '/import/bulk' if mode == 'bulk' else '/import' }}">Import</a> / Choose folder</div>
+<div class="page-heading">
+  <div>
+    <h1>Choose folder</h1>
+    <p class="muted">Browsing is limited to the configured import root.</p>
+  </div>
+</div>
+
+<div class="folder-browser-path">
+  <span class="muted">Import root</span>
+  <strong>/{{ '' if relative == '.' else relative }}</strong>
+</div>
+
+<div class="folder-browser-actions">
+  {% if parent is not none %}
+    <a class="button" href="/import/browse?mode={{ mode }}&path={{ parent|urlencode }}">← Parent folder</a>
+  {% endif %}
+  <a class="primary-action" href="{{ select_url }}?folder={{ relative|urlencode }}">Select this folder</a>
+</div>
+
+<div class="folder-list">
+{% for folder in folders %}
+  <a class="folder-row" href="/import/browse?mode={{ mode }}&path={{ folder.path|urlencode }}">
+    <span class="folder-icon" aria-hidden="true">▸</span>
+    <span>{{ folder.name }}</span>
+  </a>
+{% else %}
+  <p class="muted folder-empty">No subfolders here.</p>
+{% endfor %}
+</div>
+{% endblock %}

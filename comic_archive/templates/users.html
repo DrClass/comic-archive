@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Accounts — Comic Archive{% endblock %}
+{% block content %}
+<h1>Accounts</h1>
+<p class="muted">Accounts can only be created by an administrator. There is no public registration page.</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<h2>Create account</h2>
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+  <div class="form-row"><label for="username">Username</label><input id="username" name="username" type="text" required></div>
+  <div class="form-row"><label for="password">Initial password</label><input id="password" name="password" type="password" minlength="10" required></div>
+  <div class="form-row"><label><input type="checkbox" name="is_admin" value="yes"> Administrator</label></div>
+  <button type="submit">Create account</button>
+</form>
+
+<h2>Existing accounts</h2>
+{% for user in users %}
+<section class="card" style="margin-bottom:.8rem">
+  <div class="row">
+    <div><strong>{{ user.username }}</strong><div class="muted">{% if user.is_admin %}Administrator{% else %}Reader{% endif %} · {% if user.active %}Enabled{% else %}Disabled{% endif %}</div></div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.7rem">
+    <form method="post" action="/admin/users/{{ user.id }}/toggle-active">
+      <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+      <button type="submit">{% if user.active %}Disable{% else %}Enable{% endif %}</button>
+    </form>
+    <form method="post" action="/admin/users/{{ user.id }}/toggle-admin">
+      <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+      <button type="submit">{% if user.is_admin %}Make reader{% else %}Make admin{% endif %}</button>
+    </form>
+  </div>
+  <form method="post" action="/admin/users/{{ user.id }}/reset-password">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <div class="form-row"><label for="reset-{{ user.id }}">Reset password</label><input id="reset-{{ user.id }}" name="password" type="password" minlength="10" required></div>
+    <button type="submit">Set new password</button>
+  </form>
+</section>
+{% else %}
+<p>No accounts.</p>
+{% endfor %}
+{% endblock %}

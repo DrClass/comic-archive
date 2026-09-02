@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block title %}Import - Comic Archive{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <h1>Import folder</h1>
+    <p class="muted">Choose a comic folder on this device. It will be uploaded to the server for review before anything enters the library.</p>
+  </div>
+  <a class="admin-link" href="/import/bulk">Bulk artist import →</a>
+</div>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<section class="card upload-card">
+  <h2>Upload from this device</h2>
+  <p class="muted">Your original files stay where they are. Comic Archive uploads a temporary copy, preserving the selected folder structure.</p>
+  <form id="folder-upload-form" method="post" action="/import/upload-session" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <div class="form-row">
+      <label for="folder-picker">Comic folder</label>
+      <input id="folder-picker" name="files" type="file" webkitdirectory directory multiple required>
+    </div>
+    <p id="upload-status" class="muted">No folder selected.</p>
+    <progress id="upload-progress" max="100" value="0" hidden></progress>
+    <button id="upload-submit" type="submit">Upload and scan folder</button>
+    <button id="upload-cancel" type="button" hidden>Cancel upload</button>
+  </form>
+</section>
+
+<details class="secondary-import">
+  <summary>Import a folder already on the server</summary>
+  <p class="muted">Optional convenience for files physically available to the server. This is not required for normal remote use.</p>
+  {% if selected_label %}
+  <div class="folder-selection card">
+    <div><span class="muted">Selected server folder</span><strong>{{ selected_label }}</strong></div>
+    <a class="button" href="/import/browse?mode=single&path={{ selected_path|urlencode }}">Change</a>
+  </div>
+  <form method="post" action="/import/scan">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <input type="hidden" name="selected_path" value="{{ selected_path }}">
+    <button type="submit">Scan server folder</button>
+  </form>
+  {% else %}
+  <p><a class="button" href="/import/browse?mode=single">Browse server folders</a></p>
+  {% endif %}
+</details>
+
+<script>
+(function () {
+  const form = document.getElementById('folder-upload-form');
+  const picker = document.getElementById('folder-picker');
+  const status = document.getElementById('upload-status');
+  const progress = document.getElementById('upload-progress');
+  const button = document.getElementById('upload-submit');
+  const cancel = document.getElementById('upload-cancel');
+  if (!form || !picker) return;
+
+  const csrf = form.querySelector('input[name="csrf_token"]').value;
+  const mode = 'single';
+  const concurrency = 3;
+  const maxAttempts = 3;
+  let uploadId = null;
+  let completed = new Set();
+  let uploading = false;
+
+  function relativePath(file) {
+    return file.webkitRelativePath || file.name;
+  }
+
+  function folderLabel() {
+    if (!picker.files.length) return '';
+    const rel = relativePath(picker.files[0]);
+    return rel.includes('/') ? rel.split('/')[0] : rel;
+  }
+
+  function updateSelectionStatus() {
+    if (!picker.files.length) {
+      status.textContent = 'No folder selected.';
+      return;
+    }
+    const done = completed.size;
+    const suffix = done ? ` · ${done} already uploaded` : '';
+    status.textContent = `${folderLabel()} · ${picker.files.length} file${picker.files.length === 1 ? '' : 's'} selected${suffix}`;
+  }
+
+  async function cancelCurrentUpload() {
+    if (!uploadId) return;
+    const body = new URLSearchParams({csrf_token: csrf});
+    try {
+      await fetch(`/import/upload-session/${uploadId}/cancel`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body
+      });
+    } catch (_) {
+      // The 12-hour orphan cleanup remains the fallback if cancellation cannot reach the server.
+    }
+    uploadId = null;
+    completed = new Set();
+  }
+
+  picker.addEventListener('change', async () => {
+    if (uploadId && !uploading) await cancelCurrentUpload();
+    completed = new Set();
+    progress.value = 0;
+    progress.hidden = true;
+    updateSelectionStatus();
+  });
+
+  cancel.addEventListener('click', async () => {
+    if (uploading) {
+      status.textContent = 'Current file requests will finish before cancellation takes effect.';
+    }
+    uploading = false;
+    await cancelCurrentUpload();
+    button.disabled = false;
+    picker.disabled = false;
+    cancel.hidden = true;
+    progress.hidden = true;
+    status.textContent = 'Upload cancelled. Choose the folder again to restart.';
+  });
+
+  async function createSession() {
+    const body = new URLSearchParams({
+      csrf_token: csrf,
+      mode,
+      expected_files: String(picker.files.length)
+    });
+    const response = await fetch('/import/upload-session', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const data = await response.json();
+    uploadId = data.upload_id;
+  }
+
+  async function sendFile(file) {
+    const rel = relativePath(file);
+    if (completed.has(rel)) return;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (!uploading) throw new Error('Upload cancelled');
+      const data = new FormData();
+      data.append('csrf_token', csrf);
+      data.append('relative_path', rel);
+      data.append('file', file, file.name);
+      try {
+        const response = await fetch(`/import/upload-session/${uploadId}/file`, {
+          method: 'POST',
+          body: data
+        });
+        if (!response.ok) throw new Error(await response.text());
+        completed.add(rel);
+        progress.value = Math.round((completed.size / picker.files.length) * 100);
+        status.textContent = `Uploading… ${completed.size} of ${picker.files.length} files (${progress.value}%)`;
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxAttempts) {
+          status.textContent = `Retrying ${rel} · attempt ${attempt + 1} of ${maxAttempts}`;
+          await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, attempt - 1)));
+        }
+      }
+    }
+    throw lastError || new Error(`Failed to upload ${rel}`);
+  }
+
+  async function uploadRemaining() {
+    const files = Array.from(picker.files).filter(file => !completed.has(relativePath(file)));
+    let cursor = 0;
+    const failures = [];
+
+    async function worker() {
+      while (uploading) {
+        const index = cursor++;
+        if (index >= files.length) return;
+        const file = files[index];
+        try {
+          await sendFile(file);
+        } catch (error) {
+          if (uploading) failures.push({file, error});
+        }
+      }
+    }
+
+    await Promise.all(Array.from({length: Math.min(concurrency, files.length)}, () => worker()));
+    return failures;
+  }
+
+  async function finalizeUpload() {
+    const body = new URLSearchParams({csrf_token: csrf});
+    const response = await fetch(`/import/upload-session/${uploadId}/finalize`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body
+    });
+    const data = await response.json().catch(() => ({error: 'The server returned an invalid response.'}));
+    if (!response.ok) throw new Error(data.error || 'Unable to finalize upload.');
+    window.location.assign(data.redirect);
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!picker.files.length || uploading) {
+      if (!picker.files.length) status.textContent = 'Choose a folder first.';
+      return;
+    }
+
+    uploading = true;
+    button.disabled = true;
+    picker.disabled = true;
+    cancel.hidden = false;
+    progress.hidden = false;
+    progress.value = Math.round((completed.size / picker.files.length) * 100);
+
+    try {
+      if (!uploadId) await createSession();
+      status.textContent = `Uploading… ${completed.size} of ${picker.files.length} files`;
+      const failures = await uploadRemaining();
+      if (!uploading) return;
+
+      if (failures.length) {
+        uploading = false;
+        button.disabled = false;
+        picker.disabled = false;
+        status.textContent = `${failures.length} file${failures.length === 1 ? '' : 's'} failed after retries. Click Resume upload to retry only the remaining files.`;
+        button.textContent = 'Resume upload';
+        return;
+      }
+
+      status.textContent = 'Upload complete. Scanning folder…';
+      await finalizeUpload();
+    } catch (error) {
+      uploading = false;
+      button.disabled = false;
+      picker.disabled = false;
+      button.textContent = completed.size ? 'Resume upload' : 'Upload and scan folder';
+      status.textContent = error && error.message ? error.message : 'Upload failed. You can retry without re-uploading completed files.';
+    }
+  });
+})();
+</script>
+
+{% endblock %}

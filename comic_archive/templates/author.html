@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ author.name }} — Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/">Authors</a> / {{ author.name }}</div>
+<div class="page-heading">
+  <div>
+    <h1>{{ author.name }}</h1>
+    <p class="muted">{{ author.series|length }} series</p>
+  </div>
+  {% if request.state.user.is_admin %}<a class="admin-link" href="/authors/{{ author.id }}/edit">Edit author</a>{% endif %}
+</div>
+
+<div class="card-grid">
+{% for series in author.series %}
+  <a class="media-card" href="/series/{{ series.id }}">
+    <div class="media-card-image">
+      {% set preview = series_previews.get(series.id) %}
+      {% if preview %}
+        <img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">
+      {% else %}
+        <div class="card-placeholder">No preview</div>
+      {% endif %}
+    </div>
+    <div class="media-card-body">
+      <h2>{{ series.title }}</h2>
+      <p class="muted">{{ series.issues|length }} issue{% if series.issues|length != 1 %}s{% endif %}{% if series.extras %} · {{ series.extras|length }} extra group{% if series.extras|length != 1 %}s{% endif %}{% endif %}{% if series.updated_at %} · Modified {{ series.updated_at[:10] }}{% endif %}</p>
+    </div>
+  </a>
+{% else %}
+  <p>No series.</p>
+{% endfor %}
+</div>
+{% endblock %}

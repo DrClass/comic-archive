@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ author.name }} — Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/authors/{{ author.id }}">{{ author.name }}</a> / Edit</div>
+<h1>Edit author</h1>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+  <div class="form-row"><label for="name">Author name</label><input id="name" name="name" type="text" value="{{ author.name }}" required></div>
+  <button type="submit">Save changes</button>
+</form>
+{% endblock %}

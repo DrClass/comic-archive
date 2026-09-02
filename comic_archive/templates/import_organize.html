@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Organize import - Comic Archive{% endblock %}
+{% block content %}
+<h1>Organize files</h1>
+<p class="muted">Optional: create extra groups and move individual files before import. Source files are not changed.</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<form method="post" action="/import/{{ session_id }}/organize">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+
+{% for issue in staged.issues %}
+{% set issue_index = loop.index0 %}
+<section class="edit-section">
+  <h2>{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</h2>
+
+  <div class="inline-create">
+    <label for="new_group_{{ issue_index }}">Create extra group</label>
+    <div class="inline-controls">
+      <input id="new_group_{{ issue_index }}" name="new_group_{{ issue_index }}" type="text" placeholder="e.g. Textless, Bonus, Covers">
+      <button type="submit" name="action" value="create:{{ issue_index }}">Create group</button>
+    </div>
+  </div>
+
+  <table class="review-table">
+    <thead><tr><th>File</th><th>Current group</th><th>Put in</th></tr></thead>
+    <tbody>
+    {% set ns = namespace(media_index=0) %}
+    {% for group in issue.groups %}
+      {% for media in group.media %}
+      <tr>
+        <td>{{ media.relative_path }}</td>
+        <td>{{ "Main comic" if group.role == "primary" else group.name }}</td>
+        <td>
+          <select name="target_{{ issue_index }}_{{ ns.media_index }}">
+          {% for target in issue.groups %}
+            <option value="{{ target.relative_path }}" {% if target.relative_path == group.relative_path %}selected{% endif %}>
+              {{ "Main comic" if target.role == "primary" else target.name }}
+            </option>
+          {% endfor %}
+          </select>
+        </td>
+      </tr>
+      {% set ns.media_index = ns.media_index + 1 %}
+      {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+
+<p><button type="submit" name="action" value="continue">Save organization and continue</button></p>
+</form>
+{% endblock %}

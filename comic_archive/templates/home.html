@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Comic Archive{% endblock %}
+{% block content %}
+{% if continue_reading %}
+<section class="continue-section">
+  <h1>Continue reading</h1>
+  <div class="continue-grid">
+  {% for item in continue_reading %}
+    <a class="continue-card" href="/read/{{ item.issue_id }}">
+      <strong>{{ item.series_title }}</strong>
+      <span>{% if item.issue_number %}Issue {{ item.issue_number }}{% elif item.issue_title %}{{ item.issue_title }}{% else %}One-shot{% endif %}</span>
+      <span class="muted">{{ item.author_name }} · page {{ item.page }}</span>
+    </a>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<h1>Authors</h1>
+<div class="stats muted"><span>{{ authors|length }} authors</span><span>{{ series_count }} series</span><span>{{ issue_count }} issues</span></div>
+{% if authors %}
+<div class="grid">
+  {% for author in authors %}
+  <article class="card">
+    <h2><a href="/authors/{{ author.id }}">{{ author.name }}</a></h2>
+    <p class="muted">{{ author.series|length }} series</p>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<p>The library is empty.</p>
+{% endif %}
+{% endblock %}

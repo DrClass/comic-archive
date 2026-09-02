@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}Issue{% endif %} — {{ series.title }}{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/">Authors</a> / <a href="/authors/{{ author.id }}">{{ author.name }}</a> / <a href="/series/{{ series.id }}">{{ series.title }}</a> / Issue</div>
+<div class="page-heading">
+  <div>
+    <h1>{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</h1>
+    {% if issue.title and issue.issue_number %}<p>{{ issue.title }}</p>{% endif %}
+    <p class="muted">
+      {% if primary %}{{ primary.media|length }} page{% if primary.media|length != 1 %}s{% endif %} · {% endif %}
+      {% if issue.complete is sameas true %}Complete{% elif issue.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}
+      {% if issue.updated_at %} · Modified {{ issue.updated_at[:10] }}{% endif %}
+    </p>
+    <p>
+      {% if reading_progress and reading_progress.completed %}
+        <span class="reading-status finished">Finished</span>
+      {% elif reading_progress %}
+        <span class="reading-status in-progress">In progress · page {{ reading_progress.page }}</span>
+      {% else %}
+        <span class="reading-status unread">Unread</span>
+      {% endif %}
+    </p>
+  </div>
+  {% if request.state.user.is_admin %}<a class="admin-link" href="/issues/{{ issue.id }}/edit">Edit issue</a>{% endif %}
+</div>
+
+{% if primary and primary.media %}
+<div class="reading-actions">
+  <a class="primary-action" href="/read/{{ issue.id }}">{% if reading_progress and not reading_progress.completed %}Continue reading · page {{ reading_progress.page }}{% elif reading_progress and reading_progress.completed %}Read again{% else %}Read issue{% endif %} →</a>
+  {% if reading_progress %}
+  <form method="post" action="/progress/{{ issue.id }}/reset">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <button type="submit">Mark unread</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if extras %}
+<details class="extras-panel">
+  <summary>Extras · {{ extras|length }}</summary>
+  <div class="extras-list">
+  {% for group in extras %}
+    <a class="extras-row" href="/groups/{{ group.id }}">
+      <span><strong>{{ group.name }}</strong><br><span class="muted">{{ group.media|length }} item{% if group.media|length != 1 %}s{% endif %}</span></span>
+      <span aria-hidden="true">→</span>
+    </a>
+  {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{% if primary and primary.media %}
+<h2>Pages</h2>
+<div class="page-preview-grid">
+{% for media in primary.media %}
+  <a class="page-preview" href="/read/{{ issue.id }}?page={{ loop.index }}" aria-label="Read page {{ loop.index }}">
+    {% if media.mime_type.startswith("image/") %}
+      <img src="/thumbnail/{{ media.id }}" loading="lazy" alt="">
+    {% else %}
+      <div class="page-preview-placeholder">{{ media.media_kind|upper }}</div>
+    {% endif %}
+    <span class="page-number">{{ loop.index }}</span>
+  </a>
+{% endfor %}
+</div>
+{% else %}
+<p>No readable primary pages.</p>
+{% endif %}
+{% endblock %}

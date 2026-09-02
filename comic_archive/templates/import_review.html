@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Review import - Comic Archive{% endblock %}
+{% block content %}
+<h1>Review scan</h1>
+<p><strong>Source:</strong> {{ plan.scan.source }}</p>
+<p class="muted">Change names or classifications before staging. Nothing is copied yet.</p>
+{% if errors %}<div class="error">{% for error in errors %}{{ error }}{% if not loop.last %}\n{% endif %}{% endfor %}</div>{% endif %}
+<form method="post" action="/import/{{ session_id }}/review">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+<table class="review-table"><thead><tr><th>Path</th><th>Name</th><th>Role</th><th>Media</th></tr></thead><tbody>
+{% for item in plan.items %}
+<tr>
+<td>{{ item.relative_path }}</td>
+<td><input type="text" name="name_{{ loop.index0 }}" value="{{ item.name }}" required></td>
+<td><select name="role_{{ loop.index0 }}">{% for role in role_choices[loop.index0] %}<option value="{{ role.value }}" {% if role == item.role %}selected{% endif %}>{{ role.value }}</option>{% endfor %}</select></td>
+<td>{{ item.media_count }}</td>
+</tr>
+{% endfor %}
+</tbody></table>
+<p><button type="submit">Continue to metadata</button></p>
+</form>
+{% endblock %}

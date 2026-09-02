@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Maintenance — Comic Archive{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <h1>Library maintenance</h1>
+    <p class="muted">Read-only health checks. Nothing on this page changes library files automatically.</p>
+  </div>
+</div>
+
+<div class="maintenance-summary">
+  <a href="#gaps"><strong>{{ report.gaps|selectattr("intentional", "equalto", false)|list|length }}</strong><span>unresolved gaps</span></a>
+  <a href="#incomplete"><strong>{{ report.incomplete_issues|length }}</strong><span>incomplete/unknown</span></a>
+  <a href="#files"><strong>{{ report.missing_files|length }}</strong><span>missing files</span></a>
+  <a href="#thumbs"><strong>{{ report.missing_thumbnails|length }}</strong><span>missing thumbnails</span></a>
+  <a href="#empty"><strong>{{ report.empty_groups|length }}</strong><span>empty groups</span></a>
+  <a href="#duplicates"><strong>{{ report.duplicate_issues|length }}</strong><span>duplicate sets</span></a>
+</div>
+
+<section id="gaps" class="maintenance-section">
+<h2>Issue-number gaps</h2>
+{% set unresolved = report.gaps|selectattr("intentional", "equalto", false)|list %}
+{% if report.gaps %}
+  <ul class="list">
+  {% for gap in report.gaps %}
+    <li class="maintenance-row">
+      <div>
+        <a href="/series/{{ gap.series_id }}"><strong>{{ gap.author_name }} / {{ gap.series_title }} / Issue {{ gap.issue_number }}</strong></a>
+        {% if gap.intentional %}<span class="reading-status finished">Intentional</span>{% else %}<span class="reading-status unread">Needs review</span>{% endif %}
+        {% if gap.note %}<div class="muted">{{ gap.note }}</div>{% endif %}
+      </div>
+      <form method="post" action="/series/{{ gap.series_id }}/missing/{{ gap.issue_number }}" class="inline-gap-form">
+        <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+        <input type="hidden" name="return_to" value="/maintenance#gaps">
+        {% if gap.intentional %}
+          <input type="hidden" name="intentional" value="no"><button type="submit">Reopen</button>
+        {% else %}
+          <input type="hidden" name="intentional" value="yes"><input type="text" name="note" placeholder="Optional reason"><button type="submit">Mark intentional</button>
+        {% endif %}
+      </form>
+    </li>
+  {% endfor %}
+  </ul>
+{% else %}<p>No numeric issue gaps detected.</p>{% endif %}
+</section>
+
+<section id="incomplete" class="maintenance-section">
+<h2>Incomplete or unknown issues</h2>
+{% if report.incomplete_issues %}<ul class="list">
+{% for item in report.incomplete_issues %}
+<li><a href="/issues/{{ item.issue_id }}">{{ item.author_name }} / {{ item.series_title }} / {% if item.issue_number %}Issue {{ item.issue_number }}{% elif item.issue_title %}{{ item.issue_title }}{% else %}One-shot{% endif %}</a> · <span class="muted">{% if item.complete == 0 %}Incomplete{% else %}Completeness unknown{% endif %}</span></li>
+{% endfor %}</ul>{% else %}<p>No incomplete or unknown issues.</p>{% endif %}
+</section>
+
+<section id="files" class="maintenance-section">
+<h2>Missing managed files</h2>
+{% if report.missing_files %}<ul class="list">{% for item in report.missing_files %}
+<li><strong>{{ item.author_name }} / {{ item.series_title }}</strong>{% if item.issue_id %} / <a href="/issues/{{ item.issue_id }}">{{ item.issue_number or item.issue_title or "One-shot" }}</a>{% endif %}<br><span class="muted">{{ item.stored_path }}</span></li>
+{% endfor %}</ul>{% else %}<p>All active managed files referenced by the database exist.</p>{% endif %}
+</section>
+
+<section id="thumbs" class="maintenance-section">
+<h2>Missing thumbnails</h2>
+{% if report.missing_thumbnails %}<p>{{ report.missing_thumbnails|length }} active image{% if report.missing_thumbnails|length != 1 %}s{% endif %} need thumbnails. Use the existing <code>thumbnails-build</code> command to regenerate them.</p>
+<ul class="list">{% for item in report.missing_thumbnails[:50] %}<li>{{ item.author_name }} / {{ item.series_title }} · <span class="muted">{{ item.original_relative_path }}</span></li>{% endfor %}</ul>
+{% if report.missing_thumbnails|length > 50 %}<p class="muted">Showing the first 50.</p>{% endif %}
+{% else %}<p>No missing thumbnails.</p>{% endif %}
+</section>
+
+<section id="empty" class="maintenance-section">
+<h2>Empty content groups</h2>
+{% if report.empty_groups %}<ul class="list">{% for item in report.empty_groups %}
+<li><strong>{{ item.author_name }} / {{ item.series_title }}</strong>{% if item.issue_id %} / <a href="/issues/{{ item.issue_id }}">{{ item.issue_number or item.issue_title or "One-shot" }}</a>{% endif %} · {{ item.name }} <span class="muted">({{ item.role }})</span></li>
+{% endfor %}</ul>{% else %}<p>No empty content groups.</p>{% endif %}
+</section>
+
+<section id="duplicates" class="maintenance-section">
+<h2>Exact duplicate issue content</h2>
+{% if report.duplicate_issues %}
+{% for duplicate in report.duplicate_issues %}
+<div class="card">
+  <strong>{{ duplicate.issues|length }} issues share the same content fingerprint</strong>
+  <ul>{% for item in duplicate.issues %}<li><a href="/issues/{{ item.issue_id }}">{{ item.author_name }} / {{ item.series_title }} / {{ item.issue_number or item.issue_title or "One-shot" }}</a></li>{% endfor %}</ul>
+</div>
+{% endfor %}
+{% else %}<p>No duplicate issue fingerprints detected.</p>{% endif %}
+</section>
+{% endblock %}

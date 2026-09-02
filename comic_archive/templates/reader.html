@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+{% block title %}{{ reader_title }} — {{ series.title }}{% endblock %}
+{% block content %}
+<div class="reader-shell" id="reader" tabindex="0" data-index="{{ page_index }}">
+  <div class="reader-topbar">
+    <a href="{{ back_url }}">← {{ back_label }}</a>
+    <span><strong>{{ reader_title }}</strong> · <span id="reader-counter">{{ page_index + 1 }} / {{ media|length }}</span></span>
+  </div>
+
+  <div class="reader-toolbar" aria-label="Reader controls">
+    <label>Mode
+      <select id="reader-mode">
+        <option value="single">Single page</option>
+        <option value="vertical">Vertical scroll</option>
+      </select>
+    </label>
+    <label>Fit
+      <select id="reader-fit">
+        <option value="contain">Fit screen</option>
+        <option value="width">Fit width</option>
+        <option value="height">Fit height</option>
+        <option value="original">Original size</option>
+      </select>
+    </label>
+    <button type="button" id="reader-pages-button" aria-expanded="false" aria-controls="reader-page-drawer">Pages</button>
+    <button type="button" id="reader-fullscreen">Fullscreen</button>
+  </div>
+
+  <div class="reader-page-drawer reader-hidden" id="reader-page-drawer">
+    <div class="reader-thumbnail-grid">
+    {% for item in media %}
+      <button type="button" class="reader-thumbnail{% if loop.index0 == page_index %} current{% endif %}" data-target-page="{{ loop.index0 }}" aria-label="Go to page {{ loop.index }}">
+        {% if item.mime_type.startswith("image/") %}
+          <img src="/thumbnail/{{ item.id }}" loading="lazy" alt="">
+        {% else %}
+          <span class="reader-thumbnail-placeholder">{{ item.media_kind|upper }}</span>
+        {% endif %}
+        <span>{{ loop.index }}</span>
+      </button>
+    {% endfor %}
+    </div>
+  </div>
+
+  <div class="reader-stage" id="reader-stage" aria-live="polite">
+    {% for item in media %}
+      <div class="reader-page{% if loop.index0 != page_index %} reader-hidden{% endif %}" data-page="{{ loop.index0 }}">
+        {% if item.media_kind == "video" %}
+          <video controls preload="metadata" class="reader-media" data-src="/media/{{ item.id }}" data-type="{{ item.mime_type }}">
+            Your browser cannot play this video.
+          </video>
+        {% else %}
+          <img {% if loop.index0 == page_index %}src="/media/{{ item.id }}"{% endif %} data-src="/media/{{ item.id }}" alt="Page {{ loop.index }}" class="reader-media" draggable="false">
+        {% endif %}
+      </div>
+    {% endfor %}
+    <button type="button" class="reader-nav reader-prev" id="reader-prev" aria-label="Previous page">‹</button>
+    <button type="button" class="reader-nav reader-next" id="reader-next" aria-label="Next page">›</button>
+  </div>
+
+  <div class="reader-help muted" id="reader-help">Click the left/right side, swipe, or use ← and →. Home/End jump to first/last page.</div>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('reader');
+  if (!root || root.dataset.ready === '1') return;
+  root.dataset.ready = '1';
+
+  const pages = Array.from(root.querySelectorAll('.reader-page'));
+  const thumbnails = Array.from(root.querySelectorAll('.reader-thumbnail'));
+  const counter = document.getElementById('reader-counter');
+  const prev = document.getElementById('reader-prev');
+  const next = document.getElementById('reader-next');
+  const stage = document.getElementById('reader-stage');
+  const modeSelect = document.getElementById('reader-mode');
+  const fitSelect = document.getElementById('reader-fit');
+  const pagesButton = document.getElementById('reader-pages-button');
+  const drawer = document.getElementById('reader-page-drawer');
+  const fullscreenButton = document.getElementById('reader-fullscreen');
+  const help = document.getElementById('reader-help');
+
+  let index = Number(root.dataset.index) || 0;
+  let mode = localStorage.getItem('comicArchiveReaderMode') || 'single';
+  let fit = localStorage.getItem('comicArchiveReaderFit') || 'contain';
+  let progressTimer = null;
+  let touchStartX = null;
+  let touchStartY = null;
+  let verticalObserver = null;
+
+  const validModes = new Set(['single', 'vertical']);
+  const validFits = new Set(['contain', 'width', 'height', 'original']);
+  if (!validModes.has(mode)) mode = 'single';
+  if (!validFits.has(fit)) fit = 'contain';
+  modeSelect.value = mode;
+  fitSelect.value = fit;
+
+  function loadMedia(pageIndex) {
+    const page = pages[pageIndex];
+    if (!page) return;
+    const image = page.querySelector('img.reader-media');
+    if (image && !image.src) image.src = image.dataset.src;
+    const video = page.querySelector('video.reader-media');
+    if (video && !video.querySelector('source')) {
+      const source = document.createElement('source');
+      source.src = video.dataset.src;
+      source.type = video.dataset.type;
+      video.appendChild(source);
+      video.load();
+    }
+  }
+
+  function preloadAdjacent() {
+    if (mode !== 'single') return;
+    [index - 1, index, index + 1].forEach(loadMedia);
+  }
+
+  function loadAllMedia() {
+    pages.forEach((_, pageIndex) => loadMedia(pageIndex));
+  }
+
+  function applyFit() {
+    root.dataset.fit = fit;
+    localStorage.setItem('comicArchiveReaderFit', fit);
+  }
+
+  function recordProgress() {
+    {% if track_progress and issue %}
+    window.clearTimeout(progressTimer);
+    progressTimer = window.setTimeout(() => {
+      const body = new URLSearchParams();
+      body.set('csrf_token', {{ request.session.get('csrf_token', '')|tojson }});
+      body.set('page', String(index + 1));
+      body.set('total_pages', String(pages.length));
+      fetch('/progress/{{ issue.id }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body,
+        credentials: 'same-origin'
+      }).catch(() => {});
+    }, 200);
+    {% endif %}
+  }
+
+  function setCurrent(nextIndex, {scroll = false, updateUrl = true} = {}) {
+    index = Math.max(0, Math.min(nextIndex, pages.length - 1));
+    counter.textContent = `${index + 1} / ${pages.length}`;
+    thumbnails.forEach((thumb, i) => thumb.classList.toggle('current', i === index));
+
+    if (mode === 'single') {
+      pages.forEach((page, i) => page.classList.toggle('reader-hidden', i !== index));
+      prev.disabled = index === 0;
+      next.disabled = index === pages.length - 1;
+      preloadAdjacent();
+    } else {
+      if (scroll) pages[index].scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
+
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      url.searchParams.set('page', String(index + 1));
+      history.replaceState(null, '', url);
+    }
+    recordProgress();
+  }
+
+  function setupVerticalObserver() {
+    if (verticalObserver) verticalObserver.disconnect();
+    verticalObserver = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+      if (!visible.length) return;
+      const nextIndex = Number(visible[0].target.dataset.page);
+      if (nextIndex !== index) setCurrent(nextIndex, {scroll: false, updateUrl: true});
+    }, {threshold: [0.35, 0.55, 0.75]});
+    pages.forEach(page => verticalObserver.observe(page));
+  }
+
+  function applyMode({scrollToCurrent = false} = {}) {
+    root.dataset.mode = mode;
+    localStorage.setItem('comicArchiveReaderMode', mode);
+
+    if (mode === 'vertical') {
+      loadAllMedia();
+      pages.forEach(page => page.classList.remove('reader-hidden'));
+      prev.hidden = true;
+      next.hidden = true;
+      stage.classList.add('reader-stage-vertical');
+      help.textContent = 'Scroll vertically. Page status updates as each page comes into view.';
+      setupVerticalObserver();
+      if (scrollToCurrent) pages[index].scrollIntoView({block: 'start'});
+    } else {
+      if (verticalObserver) verticalObserver.disconnect();
+      prev.hidden = false;
+      next.hidden = false;
+      stage.classList.remove('reader-stage-vertical');
+      help.textContent = 'Click the left/right side, swipe, or use ← and →. Home/End jump to first/last page.';
+      pages.forEach((page, i) => page.classList.toggle('reader-hidden', i !== index));
+      preloadAdjacent();
+    }
+    setCurrent(index, {scroll: false, updateUrl: false});
+  }
+
+  prev.addEventListener('click', () => setCurrent(index - 1));
+  next.addEventListener('click', () => setCurrent(index + 1));
+
+  stage.addEventListener('click', (event) => {
+    if (mode !== 'single' || event.target.closest('button, video, video *')) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (event.clientX < rect.left + rect.width / 2) setCurrent(index - 1);
+    else setCurrent(index + 1);
+  });
+
+  stage.addEventListener('touchstart', (event) => {
+    if (mode !== 'single' || event.touches.length !== 1) return;
+    touchStartX = event.touches[0].clientX;
+    touchStartY = event.touches[0].clientY;
+  }, {passive: true});
+
+  stage.addEventListener('touchend', (event) => {
+    if (mode !== 'single' || touchStartX === null || !event.changedTouches.length) return;
+    const dx = event.changedTouches[0].clientX - touchStartX;
+    const dy = event.changedTouches[0].clientY - touchStartY;
+    touchStartX = null;
+    touchStartY = null;
+    if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+    setCurrent(index + (dx < 0 ? 1 : -1));
+  }, {passive: true});
+
+  root.addEventListener('keydown', (event) => {
+    if (event.target.matches('input, textarea, select, button')) return;
+    if (event.key === 'ArrowLeft' && mode === 'single') { event.preventDefault(); setCurrent(index - 1); }
+    if (event.key === 'ArrowRight' && mode === 'single') { event.preventDefault(); setCurrent(index + 1); }
+    if (event.key === 'Home') { event.preventDefault(); setCurrent(0, {scroll: mode === 'vertical'}); }
+    if (event.key === 'End') { event.preventDefault(); setCurrent(pages.length - 1, {scroll: mode === 'vertical'}); }
+  });
+
+  modeSelect.addEventListener('change', () => {
+    mode = modeSelect.value;
+    applyMode({scrollToCurrent: mode === 'vertical'});
+  });
+
+  fitSelect.addEventListener('change', () => {
+    fit = fitSelect.value;
+    applyFit();
+  });
+
+  pagesButton.addEventListener('click', () => {
+    const opening = drawer.classList.contains('reader-hidden');
+    drawer.classList.toggle('reader-hidden', !opening);
+    pagesButton.setAttribute('aria-expanded', String(opening));
+    if (opening) thumbnails[index]?.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  });
+
+  thumbnails.forEach((thumb, pageIndex) => {
+    thumb.addEventListener('click', () => {
+      setCurrent(pageIndex, {scroll: mode === 'vertical'});
+      if (mode === 'single') {
+        drawer.classList.add('reader-hidden');
+        pagesButton.setAttribute('aria-expanded', 'false');
+      }
+    });
+  });
+
+  fullscreenButton.addEventListener('click', async () => {
+    try {
+      if (!document.fullscreenElement) await root.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch (_) {}
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    fullscreenButton.textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen';
+  });
+
+  applyFit();
+  applyMode();
+  setCurrent(index, {scroll: false, updateUrl: true});
+  root.focus({preventScroll: true});
+})();
+</script>
+{% endblock %}

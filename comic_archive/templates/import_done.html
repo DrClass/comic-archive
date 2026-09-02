@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Import complete - Comic Archive{% endblock %}
+{% block content %}
+<h1>Import complete</h1>
+<p>{{ staged.author }} / {{ staged.series }}</p>
+<p>{{ result.copied_files }} files copied.</p>
+{% if bulk_error %}<div class="error">{{ bulk_error }}</div>{% endif %}
+{% if next_url %}
+<p><strong>Bulk progress: {{ bulk_progress }}</strong></p>
+<p><a class="primary-action" href="{{ next_url }}">Continue with next comic →</a></p>
+<p><a href="/series/{{ result.series_id }}">Open imported series</a></p>
+{% else %}
+<p><a href="/series/{{ result.series_id }}">Open series</a> · <a href="/import">Import another folder</a></p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Edit issue — Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/issues/{{ issue.id }}">Issue details</a> / Edit</div>
+<h1>Edit issue</h1>
+<section class="edit-section">
+  <h2>Content groups</h2>
+  <p class="muted">Create an extra group, then use a page/media editor to move selected files into it.</p>
+  <form method="post" action="/issues/{{ issue.id }}/groups">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <div class="inline-controls">
+      <input name="name" type="text" placeholder="New extra group name" required>
+      <button type="submit">Create extra group</button>
+    </div>
+  </form>
+</section>
+
+{% if primary %}
+<section class="edit-section">
+  <h2>Comic pages</h2>
+  <p class="muted">{{ primary.media|length }} active page{% if primary.media|length != 1 %}s{% endif %}. Reorder pages, remove pages, or restore previously removed pages in the page editor.</p>
+  <p><a class="primary-action" href="/groups/{{ primary.id }}/edit">Edit comic pages →</a></p>
+</section>
+{% endif %}
+
+<section class="edit-section">
+<h2>Issue details</h2>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+  <div class="form-row"><label for="issue_number">Issue number / label</label><input id="issue_number" name="issue_number" type="text" value="{{ issue.issue_number or '' }}" placeholder="Leave blank for one-shot"></div>
+  <div class="form-row"><label for="title">Issue title</label><input id="title" name="title" type="text" value="{{ issue.title or '' }}"></div>
+  <div class="form-row"><label for="complete">Completeness</label><select id="complete" name="complete">
+    <option value="" {% if issue.complete is none %}selected{% endif %}>Unknown</option>
+    <option value="yes" {% if issue.complete is sameas true %}selected{% endif %}>Complete</option>
+    <option value="no" {% if issue.complete is sameas false %}selected{% endif %}>Incomplete</option>
+  </select></div>
+  <div class="form-row"><label for="series_id">Series</label><select id="series_id" name="series_id">
+  {% for choice in series_choices %}<option value="{{ choice.id }}" {% if choice.id == series.id %}selected{% endif %}>{{ choice.author_name }} — {{ choice.title }}</option>{% endfor %}
+  </select></div>
+  <button type="submit">Save changes</button>
+</form>
+</section>
+{% endblock %}

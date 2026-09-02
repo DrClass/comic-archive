@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Bulk import complete - Comic Archive{% endblock %}
+{% block content %}
+<h1>Bulk import complete</h1>
+<p>{{ bulk.imported_series|length }} comic{% if bulk.imported_series|length != 1 %}s{% endif %} imported for {{ bulk.author }}.</p>
+{% if bulk.imported_series %}
+<ul class="list">
+{% for title, series_id in bulk.imported_series %}
+<li><a href="/series/{{ series_id }}">{{ title }}</a></li>
+{% endfor %}
+</ul>
+{% endif %}
+{% if bulk.skipped_series %}
+<h2>Skipped</h2>
+<ul class="list">
+{% for title in bulk.skipped_series %}
+<li>{{ title }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+<p><a href="/import">Back to import</a></p>
+{% endblock %}

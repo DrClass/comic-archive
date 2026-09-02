@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ series.title }} — Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/series/{{ series.id }}">{{ series.title }}</a> / Edit</div>
+<h1>Edit series</h1>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+  <div class="form-row"><label for="title">Series title</label><input id="title" name="title" type="text" value="{{ series.title }}" required></div>
+  <div class="form-row"><label for="author_id">Author</label><select id="author_id" name="author_id">
+  {% for choice in authors %}<option value="{{ choice.id }}" {% if choice.id == author.id %}selected{% endif %}>{{ choice.name }}</option>{% endfor %}
+  </select></div>
+  <button type="submit">Save changes</button>
+</form>
+{% endblock %}

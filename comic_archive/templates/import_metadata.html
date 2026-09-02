@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Import metadata - Comic Archive{% endblock %}
+{% block content %}
+<h1>Import metadata</h1>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post" action="/import/{{ session_id }}/metadata">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+<div class="form-row"><label for="author">Author</label><input id="author" name="author" type="text" required value="{{ author_value or '' }}"></div>
+<div class="form-row"><label for="series">Series</label><input id="series" name="series" type="text" required value="{{ series_value or series_default }}"></div>
+<h2>Issues</h2>
+{% for item in issue_items %}
+<fieldset class="card" style="margin-bottom:.8rem"><legend>{% if item %}{{ item.name }}{% else %}Imported issue{% endif %}</legend>
+<div class="form-row"><label>Issue number/label</label><input name="issue_number_{{ loop.index0 }}" type="text" value="{% if item %}{{ item.name }}{% endif %}"></div>
+<div class="form-row"><label>Issue title</label><input name="title_{{ loop.index0 }}" type="text"></div>
+<div class="form-row"><label>Completeness</label><select name="complete_{{ loop.index0 }}"><option value="">Unknown</option><option value="yes">Complete</option><option value="no">Incomplete</option></select></div>
+</fieldset>
+{% endfor %}
+<button type="submit">Create staging record</button>
+</form>
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Choose comics - Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/import">Import</a> / Bulk artist import</div>
+<h1>Choose comics</h1>
+<p class="muted">{{ bulk.source }} · {{ bulk.candidates|length }} comic folder{% if bulk.candidates|length != 1 %}s{% endif %} found.</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post" action="/import/bulk/{{ bulk_id }}/start">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+<div class="form-row">
+  <label for="author">Author</label>
+  <input id="author" name="author" type="text" required value="{{ bulk.author }}">
+</div>
+<div class="bulk-select-actions">
+  <button type="button" id="bulk-select-all">Select all</button>
+  <button type="button" id="bulk-select-none">Select none</button>
+</div>
+<div class="bulk-comic-list">
+{% for comic in bulk.candidates %}
+<label class="bulk-comic-row">
+  <input type="checkbox" name="comic_{{ loop.index0 }}" value="yes" checked>
+  <span><strong>{{ comic.name }}</strong><br><span class="muted">{{ comic.media_count }} supported media file{% if comic.media_count != 1 %}s{% endif %}</span></span>
+</label>
+{% endfor %}
+</div>
+<p class="muted">Each selected comic will still go through review, metadata, organization, and confirmation before it is committed.</p>
+<button type="submit">Start bulk import</button>
+</form>
+<script>
+document.getElementById('bulk-select-all')?.addEventListener('click', () => {
+  document.querySelectorAll('.bulk-comic-row input[type="checkbox"]').forEach(box => box.checked = true);
+});
+document.getElementById('bulk-select-none')?.addEventListener('click', () => {
+  document.querySelectorAll('.bulk-comic-row input[type="checkbox"]').forEach(box => box.checked = false);
+});
+</script>
+{% endblock %}

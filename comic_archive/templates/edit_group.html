@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ group.name }} — Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/series/{{ series.id }}">{{ series.title }}</a>{% if issue %} / <a href="/issues/{{ issue.id }}">Issue</a>{% endif %} / Edit {{ group.name }}</div>
+<h1>{% if group.role == "primary" %}Edit comic pages{% else %}Edit {{ group.name }}{% endif %}</h1>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+{% if group.role != "primary" %}
+  <div class="form-row"><label for="name">Extra group name</label><input id="name" name="name" type="text" value="{{ group.name }}" required></div>
+  <div class="form-row"><label for="owner">Belongs to</label><select id="owner" name="owner">
+    <option value="series" {% if not issue %}selected{% endif %}>Series: {{ series.title }}</option>
+    {% for target in target_issues %}
+    <option value="issue:{{ target.id }}" {% if issue and target.id == issue.id %}selected{% endif %}>Issue {% if target.issue_number %}{{ target.issue_number }}{% elif target.title %}{{ target.title }}{% else %}One-shot{% endif %}</option>
+    {% endfor %}
+  </select></div>
+{% else %}
+  <p><strong>{{ group.name }}</strong> is primary comic content. It cannot be moved as an extra.</p>
+{% endif %}
+
+<h2>{% if group.role == "primary" %}Page order{% else %}Media order{% endif %}</h2>
+<p class="muted">Enter positions and save. Lower numbers appear first. Removed files remain on disk and can be restored.</p>
+<table class="review-table">
+<thead><tr>{% if issue %}<th>Move</th>{% endif %}<th>Position</th><th>File</th><th>Status</th><th>Action</th></tr></thead>
+<tbody>
+{% for media in all_media %}
+<tr>
+  {% if issue %}<td>{% if media.active %}<input type="checkbox" name="move_{{ media.id }}" value="yes" aria-label="Move {{ media.original_relative_path }}">{% else %}—{% endif %}</td>{% endif %}
+  <td>{% if media.active %}<input style="max-width:6rem" type="number" min="1" name="position_{{ media.id }}" value="{{ media.position }}">{% else %}—{% endif %}</td>
+  <td>{{ media.original_relative_path }}</td>
+  <td>{% if media.active %}active{% else %}removed{% endif %}</td>
+  <td>{% if media.active %}
+      <button type="submit" formaction="/media/{{ media.id }}/remove?group_id={{ group.id }}" formmethod="post">Remove</button>
+      {% else %}
+      <button type="submit" formaction="/media/{{ media.id }}/restore?group_id={{ group.id }}" formmethod="post">Restore</button>
+      {% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table>
+{% if issue and issue_groups|length > 1 %}
+<div class="move-controls">
+  <label for="target_group_id">Move selected files to</label>
+  <div class="inline-controls">
+    <select id="target_group_id" name="target_group_id">
+      {% for target in issue_groups %}
+        {% if target.id != group.id %}
+        <option value="{{ target.id }}">{{ "Main comic" if target.role == "primary" else target.name }}</option>
+        {% endif %}
+      {% endfor %}
+    </select>
+    <button type="submit" formaction="/groups/{{ group.id }}/move-media" formmethod="post">Move selected</button>
+  </div>
+</div>
+{% elif issue %}
+<p class="muted">Create another content group from Edit issue before moving pages.</p>
+{% endif %}
+<p><button type="submit">Save group changes</button></p>
+</form>
+{% endblock %}

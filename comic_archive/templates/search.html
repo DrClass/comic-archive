@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{% if query %}Search: {{ query }}{% else %}Search{% endif %} — Comic Archive{% endblock %}
+{% block content %}
+<h1>Search</h1>
+<form class="search-page-form" method="get" action="/search">
+  <label class="sr-only" for="search-page-input">Search library</label>
+  <div class="search-controls">
+    <input id="search-page-input" name="q" type="search" value="{{ query }}" placeholder="Author, series, issue, or extra" autofocus>
+    <button type="submit">Search</button>
+  </div>
+</form>
+
+{% if query %}
+  {% if results %}
+    <p class="muted">{{ results|length }} result{% if results|length != 1 %}s{% endif %} for “{{ query }}”</p>
+    <div class="search-results">
+    {% for result in results %}
+      <a class="search-result" href="{{ result.url }}">
+        <span class="search-result-type">{{ result.type }}</span>
+        <span class="search-result-main">
+          <strong>{{ result.title }}</strong>
+          {% if result.context %}<span class="muted">{{ result.context }}</span>{% endif %}
+        </span>
+        <span aria-hidden="true">→</span>
+      </a>
+    {% endfor %}
+    </div>
+  {% else %}
+    <p>No results for “{{ query }}”.</p>
+  {% endif %}
+{% else %}
+  <p class="muted">Search author names, series titles, issue numbers and titles, and extra-group names.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ series.title }} — Comic Archive{% endblock %}
+{% block content %}
+<div class="breadcrumbs"><a href="/">Authors</a> / <a href="/authors/{{ author.id }}">{{ author.name }}</a> / {{ series.title }}</div>
+<div class="page-heading">
+  <div>
+    <h1>{{ series.title }}</h1>
+    <p class="muted">by {{ author.name }}{% if series.updated_at %} · Modified {{ series.updated_at[:10] }}{% endif %}</p>
+  </div>
+  {% if request.state.user.is_admin %}<a class="admin-link" href="/series/{{ series.id }}/edit">Edit series</a>{% endif %}
+</div>
+
+{% if series.extras %}
+<details class="extras-panel">
+  <summary>Series extras · {{ series.extras|length }}</summary>
+  <div class="extras-list">
+  {% for group in series.extras %}
+    <a class="extras-row" href="/groups/{{ group.id }}">
+      <span><strong>{{ group.name }}</strong><br><span class="muted">{{ group.media|length }} item{% if group.media|length != 1 %}s{% endif %}</span></span>
+      <span aria-hidden="true">→</span>
+    </a>
+  {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{% if missing_gaps %}
+<details class="missing-panel" open>
+  <summary>Missing issue numbers · {{ missing_gaps|length }}</summary>
+  <div class="missing-list">
+  {% for gap in missing_gaps %}
+    <div class="missing-row">
+      <div>
+        <strong>Issue {{ gap.issue_number }}</strong>
+        {% if gap.intentional %}
+          <span class="reading-status finished">Intentionally unavailable</span>
+          {% if gap.note %}<div class="muted">{{ gap.note }}</div>{% endif %}
+        {% else %}
+          <span class="reading-status unread">Missing</span>
+        {% endif %}
+      </div>
+      {% if request.state.user.is_admin %}
+      <form method="post" action="/series/{{ series.id }}/missing/{{ gap.issue_number }}" class="inline-gap-form">
+        <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+        <input type="hidden" name="return_to" value="/series/{{ series.id }}">
+        {% if gap.intentional %}
+          <input type="hidden" name="intentional" value="no">
+          <button type="submit">Treat as missing</button>
+        {% else %}
+          <input type="hidden" name="intentional" value="yes">
+          <input type="text" name="note" placeholder="Optional note">
+          <button type="submit">Mark intentional</button>
+        {% endif %}
+      </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+<h2>Issues</h2>
+<div class="card-grid">
+{% for issue in series.issues %}
+  <a class="media-card" href="/issues/{{ issue.id }}">
+    <div class="media-card-image">
+      {% set preview = issue_previews.get(issue.id) %}
+      {% if preview %}
+        <img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">
+      {% else %}
+        <div class="card-placeholder">No preview</div>
+      {% endif %}
+    </div>
+    <div class="media-card-body">
+      <h3>{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</h3>
+      {% if issue.title and issue.issue_number %}<p>{{ issue.title }}</p>{% endif %}
+      {% set saved = progress.get(issue.id) %}
+      <p>
+        {% if saved and saved.completed %}
+          <span class="reading-status finished">Finished</span>
+        {% elif saved %}
+          <span class="reading-status in-progress">In progress · page {{ saved.page }}</span>
+        {% else %}
+          <span class="reading-status unread">Unread</span>
+        {% endif %}
+      </p>
+      <p class="muted">
+        {% set primary = issue.groups|selectattr("role", "equalto", "primary")|first %}
+        {% if primary %}{{ primary.media|length }} page{% if primary.media|length != 1 %}s{% endif %} · {% endif %}
+        {% if issue.complete is sameas true %}Complete{% elif issue.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}
+        {% if issue.updated_at %} · Modified {{ issue.updated_at[:10] }}{% endif %}
+      </p>
+    </div>
+  </a>
+{% else %}
+  <p>No issues.</p>
+{% endfor %}
+</div>
+{% endblock %}

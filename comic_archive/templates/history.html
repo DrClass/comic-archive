@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Edit history — Comic Archive{% endblock %}
+{% block content %}
+<h1>Edit history</h1>
+<p class="muted">Unchanged/no-op saves are hidden.</p>
+{% if history %}
+<table class="review-table">
+<thead><tr><th>When</th><th>Changed item</th><th>Action</th><th>Before</th><th>After</th></tr></thead>
+<tbody>
+{% for item in history %}
+<tr>
+<td>{{ item.created_at }}</td>
+<td><strong>{{ item.entity_label }}</strong><br><span class="muted">{{ item.entity_type }} · {{ item.entity_id }}</span></td>
+<td>{{ item.action }}</td>
+<td><code>{{ item.before_display }}</code></td>
+<td><code>{{ item.after_display }}</code></td>
+</tr>
+{% endfor %}
+</tbody></table>
+{% else %}<p>No meaningful edits recorded yet.</p>{% endif %}
+{% endblock %}
