@@ -1,4 +1,4 @@
-# Comic Archive — Milestone 4: Commit layer
+# Comic Archive
 
 Current importer workflow:
 
