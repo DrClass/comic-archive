@@ -4,6 +4,23 @@
 <h1>Review scan</h1>
 <p><strong>Source:</strong> {{ plan.scan.source }}</p>
 <p class="muted">Change names or classifications before staging. Nothing is copied yet.</p>
+{% if flattened_folders %}
+<section class="panel">
+<h2>Folders currently included in main pages</h2>
+<p class="muted">These folders are about to be flattened into the main comic because their names were not recognized as extras. If any folder is bonus material, mark it now before continuing.</p>
+<table class="review-table"><thead><tr><th>Folder</th><th>Media</th><th></th></tr></thead><tbody>
+{% for folder in flattened_folders %}
+<tr><td>{{ folder.display_path }}</td><td>{{ folder.media_count }}</td><td>
+<form method="post" action="/import/{{ session_id }}/review/mark-extra">
+<input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+<input type="hidden" name="folder_path" value="{{ folder.relative_path }}">
+<button type="submit">Mark folder as extras</button>
+</form>
+</td></tr>
+{% endfor %}
+</tbody></table>
+</section>
+{% endif %}
 {% if errors %}<div class="error">{% for error in errors %}{{ error }}{% if not loop.last %}\n{% endif %}{% endfor %}</div>{% endif %}
 <form method="post" action="/import/{{ session_id }}/review">
 <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">

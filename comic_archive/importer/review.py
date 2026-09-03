@@ -142,6 +142,47 @@ def _validate_role_for_item(item: ReviewItem, role: ReviewRole) -> None:
         )
 
 
+
+@dataclass(frozen=True, slots=True)
+class FlattenedFolderCandidate:
+    """A source folder whose media is currently folded into primary content."""
+
+    relative_path: Path
+    display_path: Path
+    media_count: int
+
+
+def flattened_folder_candidates(scan: ScannedImport) -> list[FlattenedFolderCandidate]:
+    """Return media-bearing folders currently flattened into primary groups.
+
+    Paths are relative to ``scan.source`` so they can be passed directly back to
+    ``scan_folder(extra_folders=...)`` before staging.
+    """
+    counts: dict[Path, int] = {}
+    content_prefix = scan.content_root.relative_to(scan.source)
+
+    def add_media(base: Path, media_items) -> None:
+        for media in media_items:
+            parent = media.relative_path.parent
+            while parent != Path('.'):
+                full = base / parent
+                counts[full] = counts.get(full, 0) + 1
+                parent = parent.parent
+
+    if scan.is_series_candidate:
+        for issue in scan.issues:
+            if issue.primary is not None:
+                add_media(issue.relative_path, issue.primary.media)
+    elif scan.primary is not None:
+        add_media(Path('.'), scan.primary.media)
+
+    candidates: list[FlattenedFolderCandidate] = []
+    for display_path, count in counts.items():
+        source_path = content_prefix / display_path
+        candidates.append(FlattenedFolderCandidate(source_path, display_path, count))
+    candidates.sort(key=lambda item: tuple(part.casefold() for part in item.display_path.parts))
+    return candidates
+
 def build_review_plan(scan: ScannedImport) -> ReviewPlan:
     items: list[ReviewItem] = []
 

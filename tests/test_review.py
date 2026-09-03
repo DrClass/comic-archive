@@ -111,3 +111,44 @@ def test_review_can_rename_extra_without_touching_source(tmp_path: Path) -> None
     assert item.name == "Extras"
     assert item.changed
     assert (source / "Series - Part XX - Extras").exists()
+
+
+def test_review_exposes_unrecognized_flattened_folder_before_staging(tmp_path: Path) -> None:
+    from comic_archive.importer.review import flattened_folder_candidates
+
+    touch(tmp_path / "001.jpg")
+    touch(tmp_path / "Alternate Artwork" / "a.png")
+    touch(tmp_path / "Alternate Artwork" / "b.png")
+
+    scan = scan_folder(tmp_path)
+    assert scan.primary is not None
+    assert "Alternate Artwork/a.png" in [str(media.relative_path) for media in scan.primary.media]
+
+    candidates = flattened_folder_candidates(scan)
+    assert [(str(item.display_path), item.media_count) for item in candidates] == [
+        ("Alternate Artwork", 2),
+    ]
+
+    rescanned = scan_folder(tmp_path, extra_folders=[str(candidates[0].relative_path)])
+    plan = build_review_plan(rescanned)
+    assert plan.find("Alternate Artwork").role is ReviewRole.ISSUE_EXTRA
+    assert rescanned.primary is not None
+    assert [str(media.relative_path) for media in rescanned.primary.media] == ["001.jpg"]
+
+
+def test_series_review_exposes_unrecognized_issue_subfolder_before_staging(tmp_path: Path) -> None:
+    from comic_archive.importer.review import flattened_folder_candidates
+
+    touch(tmp_path / "Issue A" / "Pages" / "001.jpg")
+    touch(tmp_path / "Issue A" / "Gallery" / "bonus.png")
+    touch(tmp_path / "Issue B" / "001.jpg")
+
+    scan = scan_folder(tmp_path)
+    candidates = flattened_folder_candidates(scan)
+    assert any(str(item.display_path) == "Issue A/Gallery" for item in candidates)
+
+    chosen = next(item for item in candidates if str(item.display_path) == "Issue A/Gallery")
+    rescanned = scan_folder(tmp_path, extra_folders=[str(chosen.relative_path)])
+    plan = build_review_plan(rescanned)
+    assert plan.find("Issue A/Gallery").role is ReviewRole.ISSUE_EXTRA
+    assert plan.find("Issue A/Gallery").issue_path == Path("Issue A")

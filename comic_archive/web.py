@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from .importer.commit import CommitError, commit_staged_import, initialize_database
-from .importer.review import ReviewError, ReviewPlan, ReviewRole, build_review_plan
+from .importer.review import ReviewError, ReviewPlan, ReviewRole, build_review_plan, flattened_folder_candidates
 from .importer.scanner import FolderScanError, scan_folder
 from .importer.bulk import BulkComicCandidate, discover_artist_comics
 from .importer.staging import StagedImport, StagingError, build_staged_import, create_staged_issue_extra, move_staged_media, remove_empty_staged_group
@@ -60,6 +60,7 @@ class ImportSession:
     upload_root: Path | None = None
     pdf_cache_root: Path | None = None
     last_activity: float = field(default_factory=time.time)
+    extra_folder_overrides: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -1249,8 +1250,36 @@ def create_app(
         return templates.TemplateResponse(
             request=request,
             name="import_review.html",
-            context={"session_id": session_id, "plan": session.plan, "role_choices": role_choices, "errors": []},
+            context={
+                "session_id": session_id, "plan": session.plan, "role_choices": role_choices, "errors": [],
+                "flattened_folders": [
+                    item for item in flattened_folder_candidates(session.plan.scan)
+                    if str(item.relative_path) not in session.extra_folder_overrides
+                ],
+            },
         )
+
+    @app.post("/import/{session_id}/review/mark-extra", response_class=HTMLResponse)
+    async def import_review_mark_extra(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        relative_path = form.get("folder_path", "").strip()
+        candidates = {str(item.relative_path): item for item in flattened_folder_candidates(session.plan.scan)}
+        if relative_path not in candidates:
+            raise HTTPException(status_code=400, detail="Folder is not an available flattened folder")
+        session.extra_folder_overrides.add(relative_path)
+        try:
+            scan = scan_folder(
+                session.plan.scan.source,
+                extra_folders=sorted(session.extra_folder_overrides),
+                pdf_cache_root=session.pdf_cache_root,
+            )
+            session.plan = build_review_plan(scan)
+        except (FolderScanError, OSError) as exc:
+            session.extra_folder_overrides.discard(relative_path)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
 
     @app.post("/import/{session_id}/review", response_class=HTMLResponse)
     async def import_review_save(request: Request, session_id: str):
@@ -1273,7 +1302,13 @@ def create_app(
             return templates.TemplateResponse(
                 request=request,
                 name="import_review.html",
-                context={"session_id": session_id, "plan": session.plan, "role_choices": role_choices, "errors": errors},
+                context={
+                    "session_id": session_id, "plan": session.plan, "role_choices": role_choices, "errors": errors,
+                    "flattened_folders": [
+                        item for item in flattened_folder_candidates(session.plan.scan)
+                        if str(item.relative_path) not in session.extra_folder_overrides
+                    ],
+                },
                 status_code=400,
             )
         return RedirectResponse(f"/import/{session_id}/metadata", status_code=303)

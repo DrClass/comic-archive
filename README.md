@@ -500,3 +500,9 @@ PDF files are accepted as importer input. Each PDF page is rendered at 150 DPI t
 - Existing series can be reordered from the Edit series page using numeric order fields. Values are normalized on save.
 - Series pages and issue-selection helpers consistently use the stored manual order before legacy label/title fallback.
 - Reordering is audited and updates modified timestamps.
+
+## Milestone 26: pre-flatten folder classification
+
+The web import review now exposes media-bearing folders that are currently included in primary content but were not recognized as extras. Admins can click **Mark folder as extras** before staging. The importer rescans the untouched source with an explicit extra-folder override, preserving that folder as a real extra group instead of requiring page-by-page regrouping later.
+
+This works for one-shot comics and for folders nested inside detected series issues, including structures such as `Issue A/Pages/...` plus `Issue A/Gallery/...` where `Gallery` is bonus material but has no recognized extra keyword.
