@@ -23,8 +23,12 @@
     </div>
     <div class="media-card-body">
       <h2>{{ series.title }}</h2>
-      <p class="muted">{{ series.issues|length }} issue{% if series.issues|length != 1 %}s{% endif %} · {% if series.complete is sameas true %}Complete{% elif series.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}{% if series.extras %} · {{ series.extras|length }} extra group{% if series.extras|length != 1 %}s{% endif %}{% endif %}{% if series.updated_at %} · Modified {{ series.updated_at[:10] }}{% endif %}</p>
-      {% if series.issues %}<p class="muted">{% for issue in series.issues %}{% set primary = issue.groups|selectattr("role", "equalto", "primary")|first %}{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}: {{ primary.media|length if primary else 0 }} page{% if not primary or primary.media|length != 1 %}s{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+      <p class="muted series-summary">
+        <span>{{ series.issues|length }} issue{% if series.issues|length != 1 %}s{% endif %}</span><br>
+        <span>{% if series.complete is sameas true %}Complete{% elif series.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}</span><br>
+        <span>Modified {{ series.updated_at[:10] if series.updated_at else "Unknown" }}</span><br>
+        <span>{{ series.total_pages }} page{% if series.total_pages != 1 %}s{% endif %} + {{ series.total_extras }} extra{% if series.total_extras != 1 %}s{% endif %}</span>
+      </p>
     </div>
   </a>
 {% else %}

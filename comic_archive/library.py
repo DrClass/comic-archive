@@ -47,6 +47,26 @@ class SeriesView:
     issues: list[IssueView] = field(default_factory=list)
     extras: list[GroupView] = field(default_factory=list)
 
+    @property
+    def total_pages(self) -> int:
+        return sum(
+            len(group.media)
+            for issue in self.issues
+            for group in issue.groups
+            if group.role == "primary"
+        )
+
+    @property
+    def total_extras(self) -> int:
+        issue_extras = sum(
+            len(group.media)
+            for issue in self.issues
+            for group in issue.groups
+            if group.role != "primary"
+        )
+        series_extras = sum(len(group.media) for group in self.extras)
+        return issue_extras + series_extras
+
 
 @dataclass(slots=True)
 class AuthorView:

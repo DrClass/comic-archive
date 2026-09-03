@@ -476,3 +476,7 @@ Fixed a production-only login failure exposed by browser background requests suc
 - Extra-like folders nested beneath neutral page/container directories are preserved as extras instead of being flattened into primary comic pages.
 - Organizer Create/Remove group actions first save all current file-to-group selections, so their page reload no longer discards pending moves.
 - The organizer blocks continuation when any content group is empty, identifies the empty group, and allows empty extra groups to be removed. Commit validation also rejects empty groups as a final safeguard.
+
+## Milestone 23.1 — Series card summaries
+
+Author-page series cards now show a compact five-line summary: series title, issue count, series completeness, modified date, and aggregate page/extra counts. Page totals sum active media in primary groups across all issues. Extra totals sum active media in issue-level extra groups plus series-level extra groups.

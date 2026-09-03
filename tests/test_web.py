@@ -2057,13 +2057,16 @@ def test_import_pages_use_resumable_file_by_file_upload_ui(tmp_path: Path):
         assert "/finalize" in response.text
 
 
-def test_author_page_reports_page_count_for_each_issue(tmp_path: Path):
+def test_author_page_reports_series_summary_totals(tmp_path: Path):
     database, library, result = _make_library(tmp_path)
     client = _admin_client(database, library)
 
     response = client.get(f"/authors/{result.author_id}")
     assert response.status_code == 200
-    assert "Issue 1: 1 page" in response.text
+    assert "1 issue" in response.text
+    assert "Completeness unknown" in response.text
+    assert "1 page + 1 extra" in response.text
+    assert "Issue 1: 1 page" not in response.text
 
 
 def test_series_completeness_can_be_edited_in_web_ui(tmp_path: Path):
