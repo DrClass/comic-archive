@@ -22,7 +22,7 @@ from .importer.scanner import FolderScanError, scan_folder
 from .importer.bulk import BulkComicCandidate, discover_artist_comics
 from .importer.staging import StagedImport, StagingError, build_staged_import, create_staged_issue_extra, move_staged_media, remove_empty_staged_group
 from .library import AuthorView, GroupView, IssueView, MediaView, SeriesView, read_library
-from .editing import EditError, create_issue_extra_group, edit_issue, edit_series, get_history, move_extra_group, move_media_to_group, rename_author, rename_group, reorder_media, set_media_active
+from .editing import EditError, create_issue_extra_group, edit_issue, edit_series, get_history, move_extra_group, move_media_to_group, rename_author, rename_group, reorder_issues, reorder_media, set_media_active
 from .thumbnails import THUMBNAIL_MIME, ensure_thumbnail
 from .progress import get_continue_reading, get_progress, get_progress_map, reset_progress, save_progress
 from .maintenance import build_maintenance_report, series_gaps, set_intentional_gap
@@ -531,8 +531,8 @@ def _issues_for_series(database: Path, series_id: str) -> list[dict[str, object]
     with sqlite3.connect(database) as db:
         db.row_factory = sqlite3.Row
         rows = db.execute(
-            """SELECT id, issue_number, title FROM issues WHERE series_id = ?
-               ORDER BY COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
+            """SELECT id, issue_number, title, sort_order FROM issues WHERE series_id = ?
+               ORDER BY COALESCE(sort_order, 2147483647), COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
             (series_id,),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -1317,6 +1317,7 @@ def create_app(
                     "issue_number": form.get(f"issue_number_{index}", ""),
                     "title": form.get(f"title_{index}", ""),
                     "complete": complete,
+                    "sort_order": form.get(f"sort_order_{index}", str(index + 1)),
                 }
         else:
             issue_items = [None]
@@ -1324,6 +1325,7 @@ def create_app(
                 "issue_number": form.get("issue_number_0", ""),
                 "title": form.get("title_0", ""),
                 "complete": form.get("complete_0", ""),
+                "sort_order": form.get("sort_order_0", "1"),
             }
         try:
             staged = build_staged_import(
@@ -1774,6 +1776,17 @@ def create_app(
                 author_id=form.get("author_id", author.id),
                 complete=_bool_form(form.get("complete", "")),
             )
+            if series.issues:
+                ranked_issues: list[tuple[int, int, str]] = []
+                for index, issue in enumerate(series.issues):
+                    raw_order = form.get(f"issue_order_{issue.id}", str(index + 1)).strip()
+                    try:
+                        order_value = int(raw_order)
+                    except ValueError as exc:
+                        raise EditError("Issue order must use whole numbers") from exc
+                    ranked_issues.append((order_value, index, issue.id))
+                ranked_issues.sort()
+                reorder_issues(database, series_id, [issue_id for _, _, issue_id in ranked_issues])
         except EditError as exc:
             return templates.TemplateResponse(
                 request=request, name="edit_series.html",

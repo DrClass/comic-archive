@@ -43,6 +43,7 @@ class StagedIssue:
     issue_number: str | None
     title: str | None
     complete: bool | None
+    sort_order: int | None = None
     groups: list[StagedGroup] = field(default_factory=list)
 
 
@@ -156,6 +157,7 @@ def build_staged_import(
                         issue_number=_optional_text(meta.get("issue_number", issue.name)),
                         title=_optional_text(meta.get("title")),
                         complete=_optional_bool(meta.get("complete")),
+                        sort_order=_optional_int(meta.get("sort_order")),
                     )
                     if issue.primary:
                         staged.groups.append(_group(issue.primary, ReviewRole.PRIMARY, "issue", key))
@@ -191,6 +193,7 @@ def build_staged_import(
                     issue_number=_optional_text(meta.get("issue_number", item.name)),
                     title=_optional_text(meta.get("title")),
                     complete=_optional_bool(meta.get("complete")),
+                    sort_order=_optional_int(meta.get("sort_order")),
                     groups=[_group(group, ReviewRole.PRIMARY, "issue", key, name=item.name)],
                 )
 
@@ -215,6 +218,7 @@ def build_staged_import(
             issue_number=_optional_text(meta.get("issue_number")),
             title=_optional_text(meta.get("title")),
             complete=_optional_bool(meta.get("complete")),
+            sort_order=_optional_int(meta.get("sort_order")),
         )
         for item in plan.items:
             group = _find_group(plan, item.relative_path)
@@ -330,3 +334,12 @@ def _optional_bool(value: object) -> bool | None:
     if text in {"n", "no", "false", "0", "incomplete"}:
         return False
     raise StagingError(f"Invalid completeness value: {value!r}")
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise StagingError("Issue order must be a whole number") from exc

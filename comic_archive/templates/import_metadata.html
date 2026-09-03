@@ -11,6 +11,7 @@
 <h2>Issues</h2>
 {% for item in issue_items %}
 <fieldset class="card" style="margin-bottom:.8rem"><legend>{% if item %}{{ item.name }}{% else %}Imported issue{% endif %}</legend>
+<div class="form-row"><label>Order</label><input name="sort_order_{{ loop.index0 }}" type="number" step="1" value="{{ loop.index }}"></div>
 <div class="form-row"><label>Issue number/label</label><input name="issue_number_{{ loop.index0 }}" type="text" value="{% if item %}{{ item.name }}{% endif %}"></div>
 <div class="form-row"><label>Issue title</label><input name="title_{{ loop.index0 }}" type="text"></div>
 <div class="form-row"><label>Completeness</label><select name="complete_{{ loop.index0 }}"><option value="">Unknown</option><option value="yes">Complete</option><option value="no">Incomplete</option></select></div>

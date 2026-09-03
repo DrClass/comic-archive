@@ -11,6 +11,16 @@
   {% for choice in authors %}<option value="{{ choice.id }}" {% if choice.id == author.id %}selected{% endif %}>{{ choice.name }}</option>{% endfor %}
   </select></div>
   <div class="form-row"><label for="complete">Completeness</label><select id="complete" name="complete"><option value="" {% if series.complete is none %}selected{% endif %}>Unknown</option><option value="yes" {% if series.complete is sameas true %}selected{% endif %}>Complete</option><option value="no" {% if series.complete is sameas false %}selected{% endif %}>Incomplete</option></select></div>
+  {% if series.issues %}
+  <h2>Issue order</h2>
+  <p class="muted">Lower numbers appear first. You can use any whole numbers; they will be normalized when saved.</p>
+  {% for issue in series.issues %}
+  <div class="form-row">
+    <label for="issue_order_{{ issue.id }}">{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</label>
+    <input id="issue_order_{{ issue.id }}" name="issue_order_{{ issue.id }}" type="number" step="1" value="{{ loop.index }}">
+  </div>
+  {% endfor %}
+  {% endif %}
   <button type="submit">Save changes</button>
 </form>
 {% endblock %}

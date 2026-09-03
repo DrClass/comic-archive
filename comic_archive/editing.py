@@ -123,6 +123,24 @@ def edit_series(
         _audit(db, entity_type="series", entity_id=series_id, action="edit", before=before, after=after)
 
 
+
+def reorder_issues(database_path: str | Path, series_id: str, issue_ids: list[str]) -> None:
+    with _connect(database_path) as db:
+        rows = db.execute(
+            "SELECT id, sort_order FROM issues WHERE series_id = ? ORDER BY COALESCE(sort_order, 2147483647), id",
+            (series_id,),
+        ).fetchall()
+        existing_ids = [row["id"] for row in rows]
+        if set(existing_ids) != set(issue_ids) or len(existing_ids) != len(issue_ids):
+            raise EditError("Issue order must include every issue in the series exactly once")
+        before = {row["id"]: row["sort_order"] for row in rows}
+        after = {issue_id: index for index, issue_id in enumerate(issue_ids, start=1)}
+        if before == after:
+            return
+        for issue_id, sort_order in after.items():
+            db.execute("UPDATE issues SET sort_order = ? WHERE id = ? AND series_id = ?", (sort_order, issue_id, series_id))
+        _audit(db, entity_type="series", entity_id=series_id, action="reorder_issues", before=before, after=after)
+
 def edit_issue(
     database_path: str | Path,
     issue_id: str,

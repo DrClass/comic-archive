@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS issues (
     issue_number TEXT,
     title TEXT,
     complete INTEGER,
+    sort_order INTEGER,
     content_fingerprint TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -128,6 +129,18 @@ def _ensure_schema_columns(db: sqlite3.Connection) -> None:
     media_columns = {row[1] for row in db.execute("PRAGMA table_info(media)")}
     if "content_fingerprint" not in issue_columns:
         db.execute("ALTER TABLE issues ADD COLUMN content_fingerprint TEXT")
+    if "sort_order" not in issue_columns:
+        db.execute("ALTER TABLE issues ADD COLUMN sort_order INTEGER")
+        # Preserve the library's previous display order when introducing manual ordering.
+        series_ids = [row[0] for row in db.execute("SELECT id FROM series").fetchall()]
+        for series_id in series_ids:
+            issue_ids = [row[0] for row in db.execute(
+                """SELECT id FROM issues WHERE series_id = ?
+                   ORDER BY COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
+                (series_id,),
+            ).fetchall()]
+            for index, issue_id in enumerate(issue_ids, start=1):
+                db.execute("UPDATE issues SET sort_order = ? WHERE id = ?", (index, issue_id))
     if "sha256" not in media_columns:
         db.execute("ALTER TABLE media ADD COLUMN sha256 TEXT")
     if "active" not in media_columns:
@@ -180,7 +193,13 @@ def _ensure_schema_columns(db: sqlite3.Connection) -> None:
       UPDATE series SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
     END;
     CREATE TRIGGER IF NOT EXISTS touch_issue_after_issue_update
-    AFTER UPDATE OF series_id, issue_number, title, complete, content_fingerprint ON issues
+    AFTER UPDATE OF series_id, issue_number, title, complete, sort_order, content_fingerprint ON issues
+    BEGIN
+      UPDATE issues SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+      UPDATE series SET updated_at = CURRENT_TIMESTAMP WHERE id IN (OLD.series_id, NEW.series_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS touch_issue_after_sort_order_update
+    AFTER UPDATE OF sort_order ON issues
     BEGIN
       UPDATE issues SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
       UPDATE series SET updated_at = CURRENT_TIMESTAMP WHERE id IN (OLD.series_id, NEW.series_id);
@@ -552,14 +571,25 @@ def commit_staged_import(
             author_id = _find_or_create_author(db, staged.author)
             series_id = _find_or_create_series(db, author_id, staged.series, staged.series_complete)
 
-            for issue in staged.issues:
+            existing_max_order = db.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) FROM issues WHERE series_id = ?",
+                (series_id,),
+            ).fetchone()[0]
+            ordered_staged_issues = sorted(
+                enumerate(staged.issues),
+                key=lambda pair: (
+                    pair[1].sort_order if pair[1].sort_order is not None else pair[0] + 1,
+                    pair[0],
+                ),
+            )
+            for import_position, (_, issue) in enumerate(ordered_staged_issues, start=1):
                 issue_id = str(uuid4())
                 complete_value = None if issue.complete is None else int(issue.complete)
                 fingerprint, issue_hashes = computed_hashes[issue.source_key]
                 db.execute(
                     """INSERT INTO issues
-                       (id, series_id, source_key, issue_number, title, complete, content_fingerprint)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (id, series_id, source_key, issue_number, title, complete, sort_order, content_fingerprint)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         issue_id,
                         series_id,
@@ -567,6 +597,7 @@ def commit_staged_import(
                         issue.issue_number,
                         issue.title,
                         complete_value,
+                        existing_max_order + import_position,
                         fingerprint,
                     ),
                 )

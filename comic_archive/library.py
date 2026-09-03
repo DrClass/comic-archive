@@ -34,6 +34,7 @@ class IssueView:
     issue_number: str | None
     title: str | None
     complete: bool | None
+    sort_order: int | None = None
     updated_at: str | None = None
     groups: list[GroupView] = field(default_factory=list)
 
@@ -92,9 +93,9 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
             ):
                 series = SeriesView(id=series_row["id"], title=series_row["title"], complete=_bool_or_none(series_row["complete"]), updated_at=series_row["updated_at"])
                 for issue_row in db.execute(
-                    """SELECT id, issue_number, title, complete, updated_at
+                    """SELECT id, issue_number, title, complete, sort_order, updated_at
                        FROM issues WHERE series_id = ?
-                       ORDER BY COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
+                       ORDER BY COALESCE(sort_order, 2147483647), COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
                     (series.id,),
                 ):
                     issue = IssueView(
@@ -102,6 +103,7 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
                         issue_number=issue_row["issue_number"],
                         title=issue_row["title"],
                         complete=_bool_or_none(issue_row["complete"]),
+                        sort_order=issue_row["sort_order"],
                         updated_at=issue_row["updated_at"],
                     )
                     issue.groups = _read_groups(db, series.id, issue.id)

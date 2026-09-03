@@ -491,3 +491,12 @@ Author-page series cards now show a compact five-line summary: series title, iss
 ### PDF import
 
 PDF files are accepted as importer input. Each PDF page is rendered at 150 DPI to an ordered PNG (`0001.png`, `0002.png`, ...), then follows the normal image import path. The source PDF is never modified. Rendered temporary pages are cleaned with their web import session, while the managed library stores ordinary PNG files. PDF rendering uses PyMuPDF, included in the `web` optional dependencies.
+
+## Milestone 25 — Manual issue ordering
+
+- Issues now have a persistent per-series `sort_order`.
+- Existing databases automatically preserve their previous displayed issue order during migration.
+- Import metadata includes an Order field for every issue; the chosen relative order is preserved on commit.
+- Existing series can be reordered from the Edit series page using numeric order fields. Values are normalized on save.
+- Series pages and issue-selection helpers consistently use the stored manual order before legacy label/title fallback.
+- Reordering is audited and updates modified timestamps.

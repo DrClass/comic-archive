@@ -11,6 +11,7 @@ from comic_archive.editing import (
     move_extra_group,
     rename_author,
     rename_group,
+    reorder_issues,
     reorder_media,
     set_media_active,
 )
@@ -186,3 +187,25 @@ def test_edit_series_completeness(tmp_path: Path) -> None:
     assert read_library(tmp_path / "db.sqlite3")[0].series[0].complete is False
     edit_series(tmp_path / "db.sqlite3", result.series_id, complete=None)
     assert read_library(tmp_path / "db.sqlite3")[0].series[0].complete is None
+
+
+def test_issue_order_can_be_changed_after_import(tmp_path: Path) -> None:
+    source = tmp_path / "ordered-series"
+    for name in ("Zebra", "Alpha", "Middle"):
+        touch(source / name / "001.jpg", name.encode())
+    staged = build_staged_import(
+        build_review_plan(scan_folder(source)),
+        author="Artist",
+        series="Unnumbered",
+        issue_metadata={
+            "Alpha": {"issue_number": "", "title": "Alpha"},
+            "Middle": {"issue_number": "", "title": "Middle"},
+            "Zebra": {"issue_number": "", "title": "Zebra"},
+        },
+    )
+    db = tmp_path / "order.sqlite3"
+    result = commit_staged_import(staged, library_root=tmp_path / "library-order", database_path=db)
+    series = read_library(db)[0].series[0]
+    by_title = {issue.title: issue.id for issue in series.issues}
+    reorder_issues(db, result.series_id, [by_title["Zebra"], by_title["Middle"], by_title["Alpha"]])
+    assert [issue.title for issue in read_library(db)[0].series[0].issues] == ["Zebra", "Middle", "Alpha"]

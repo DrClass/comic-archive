@@ -114,3 +114,40 @@ def test_stage_series_keeps_nested_extras_under_each_issue_separate(tmp_path: Pa
             ("primary", "Primary", 2),
             ("issue-extra", "extras", 1),
         ]
+
+
+def test_stage_preserves_manual_issue_order(tmp_path: Path) -> None:
+    for name in ("Alpha", "Beta", "Gamma"):
+        touch(tmp_path / name / "001.jpg")
+    staged = build_staged_import(
+        build_review_plan(scan_folder(tmp_path)),
+        author="Artist",
+        series="Series",
+        issue_metadata={
+            "Alpha": {"title": "Alpha", "sort_order": "3"},
+            "Beta": {"title": "Beta", "sort_order": "1"},
+            "Gamma": {"title": "Gamma", "sort_order": "2"},
+        },
+    )
+    assert {issue.title: issue.sort_order for issue in staged.issues} == {"Alpha": 3, "Beta": 1, "Gamma": 2}
+
+
+def test_commit_uses_manual_import_issue_order(tmp_path: Path) -> None:
+    from comic_archive.importer.commit import commit_staged_import
+    from comic_archive.library import read_library
+
+    for name in ("Alpha", "Beta", "Gamma"):
+        touch(tmp_path / "source" / name / "001.jpg", name.encode())
+    staged = build_staged_import(
+        build_review_plan(scan_folder(tmp_path / "source")),
+        author="Artist",
+        series="Manual order",
+        issue_metadata={
+            "Alpha": {"title": "Alpha", "sort_order": 3},
+            "Beta": {"title": "Beta", "sort_order": 1},
+            "Gamma": {"title": "Gamma", "sort_order": 2},
+        },
+    )
+    db = tmp_path / "manual-order.sqlite3"
+    commit_staged_import(staged, library_root=tmp_path / "manual-library", database_path=db)
+    assert [issue.title for issue in read_library(db)[0].series[0].issues] == ["Beta", "Gamma", "Alpha"]
