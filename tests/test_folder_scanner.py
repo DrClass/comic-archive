@@ -226,3 +226,51 @@ def test_nested_extra_below_page_container_is_not_flattened_into_primary(tmp_pat
         ("Extras", "Extras")
     ]
     assert [item.relative_path.name for item in result.extras[0].media] == ["bonus.png"]
+
+
+def test_series_with_nested_extras_under_every_issue_keeps_them_separate(tmp_path: Path) -> None:
+    for issue_number in (1, 2, 3):
+        issue = tmp_path / f"issue {issue_number}"
+        touch(issue / "001.jpg")
+        touch(issue / "002.jpg")
+        touch(issue / "extras" / "bonus-1.png")
+        touch(issue / "extras" / "bonus-2.png")
+
+    result = scan_folder(tmp_path)
+
+    assert result.is_series_candidate
+    assert [issue.name for issue in result.issues] == ["issue 1", "issue 2", "issue 3"]
+    for issue in result.issues:
+        assert issue.primary is not None
+        assert [item.relative_path.name for item in issue.primary.media] == ["001.jpg", "002.jpg"]
+        assert [(group.name, len(group.media)) for group in issue.extras] == [("extras", 2)]
+        assert all("extras" not in item.relative_path.parts for item in issue.primary.media)
+
+
+
+def test_series_issue_sibling_folder_defaults_to_extra_when_direct_pages_exist(tmp_path: Path) -> None:
+    for number in (1, 2):
+        issue = tmp_path / f"issue {number}"
+        touch(issue / "001.jpg")
+        touch(issue / "002.jpg")
+    touch(tmp_path / "issue 1" / "Alternate Material" / "alt.png")
+
+    result = scan_folder(tmp_path)
+
+    first = result.issues[0]
+    assert first.primary is not None
+    assert [item.relative_path.name for item in first.primary.media] == ["001.jpg", "002.jpg"]
+    assert [(group.name, str(group.relative_path)) for group in first.extras] == [
+        ("Alternate Material", "issue 1/Alternate Material")
+    ]
+
+def test_pages_container_still_folds_into_primary(tmp_path: Path) -> None:
+    touch(tmp_path / "Pages" / "001.jpg")
+    touch(tmp_path / "Pages" / "002.jpg")
+    touch(tmp_path / "Pages" / "Extras" / "bonus.png")
+
+    result = scan_folder(tmp_path)
+
+    assert result.primary is not None
+    assert [item.relative_path.name for item in result.primary.media] == ["001.jpg", "002.jpg"]
+    assert [(group.name, len(group.media)) for group in result.extras] == [("Extras", 1)]

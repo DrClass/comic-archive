@@ -480,3 +480,10 @@ Fixed a production-only login failure exposed by browser background requests suc
 ## Milestone 23.1 — Series card summaries
 
 Author-page series cards now show a compact five-line summary: series title, issue count, series completeness, modified date, and aggregate page/extra counts. Page totals sum active media in primary groups across all issues. Extra totals sum active media in issue-level extra groups plus series-level extra groups.
+
+## Milestone 23.2 — nested issue extras detection
+- Series issue folders now preserve distinct child content folders instead of silently flattening them into the issue's primary pages when the issue already has direct page files.
+- Extra-like folders such as `issue 1/extras/` are always staged as issue-level extra groups.
+- Conventional primary page containers such as `Pages/`, `Images/`, `Main/`, and `Primary/` still fold into the main comic.
+- Existing one-shot import behavior remains unchanged for arbitrary nested page folders.
+- Added regression coverage for multi-issue series with nested extras and end-to-end staging preservation.

@@ -40,6 +40,7 @@ _EXTRA_WORDS = {
     "covers",
 }
 _TOKENIZE = re.compile(r"[^a-z0-9]+")
+_PRIMARY_CONTAINER_WORDS = {"page", "pages", "image", "images", "comic", "main", "primary"}
 
 
 class FolderScanError(ValueError):
@@ -205,24 +206,37 @@ def _scan_extra_groups(directory: Path, relative_to: Path) -> list[ScannedGroup]
     return groups
 
 
+def _looks_like_primary_container(directory: Path) -> bool:
+    """Return True for conventional folders that merely contain main comic pages."""
+    tokens = {token for token in _TOKENIZE.split(directory.name.casefold()) if token}
+    return bool(tokens & _PRIMARY_CONTAINER_WORDS)
+
+
 def _scan_single_issue(
     directory: Path,
     relative_to: Path,
     *,
     extra_overrides: set[Path] | None = None,
     primary_overrides: set[Path] | None = None,
+    separate_child_folders: bool = False,
 ) -> tuple[ScannedGroup | None, list[ScannedGroup]]:
-    """Scan one issue-like directory without flattening extra-like folders."""
-    direct_files = [child for child in directory.iterdir() if child.is_file()]
-    primary_media = _scan_media(direct_files, directory)
+    """Scan one issue while preserving meaningful child folders as groups.
 
-    # Non-extra subfolders are allowed to be page containers (e.g. Pages/).
-    # Their media is folded into primary. Extra-like folders are kept apart even
-    # when they are nested below a neutral page/container folder.
-    extra_dirs: list[Path] = []
+    Direct files belong to the main comic. Extra-like folders are always kept
+    separate, at any depth. When an issue already has direct page files, other
+    sibling folders are also treated as extra groups by default instead of being
+    silently flattened into primary content. Conventional page containers such
+    as ``Pages``/``Images`` and explicit primary overrides remain primary.
+    """
+    direct_files = [
+        child for child in directory.iterdir()
+        if child.is_file() and not _is_ignored(child) and _media_info(child)
+    ]
     primary_nested_files: list[Path] = []
+    extra_dirs: list[Path] = []
+    has_direct_primary = bool(direct_files)
 
-    def walk_container(container: Path) -> None:
+    def walk_container(container: Path, *, force_primary: bool = False) -> None:
         for child in container.iterdir():
             if child.is_file():
                 if not _is_ignored(child) and _media_info(child):
@@ -230,11 +244,25 @@ def _scan_single_issue(
                 continue
             if not child.is_dir() or not _contains_supported_media(child):
                 continue
+
+            resolved = child.resolve()
+            explicitly_primary = bool(primary_overrides and resolved in primary_overrides)
             if _looks_like_extra(
                 child,
                 extra_overrides=extra_overrides,
                 primary_overrides=primary_overrides,
             ):
+                extra_dirs.append(child)
+                continue
+
+            if force_primary or explicitly_primary or _looks_like_primary_container(child):
+                walk_container(child, force_primary=True)
+                continue
+
+            # If the issue already has its own direct pages, a separate sibling
+            # folder represents separate material unless the user explicitly or
+            # conventionally marked it as another primary page container.
+            if separate_child_folders and has_direct_primary:
                 extra_dirs.append(child)
             else:
                 walk_container(child)
@@ -242,18 +270,23 @@ def _scan_single_issue(
     for child in directory.iterdir():
         if not child.is_dir() or not _contains_supported_media(child):
             continue
+        resolved = child.resolve()
+        explicitly_primary = bool(primary_overrides and resolved in primary_overrides)
         if _looks_like_extra(
             child,
             extra_overrides=extra_overrides,
             primary_overrides=primary_overrides,
         ):
             extra_dirs.append(child)
+        elif explicitly_primary or _looks_like_primary_container(child):
+            walk_container(child, force_primary=True)
+        elif separate_child_folders and has_direct_primary:
+            extra_dirs.append(child)
         else:
             walk_container(child)
 
-    if primary_nested_files:
-        combined = [path for path in direct_files if _media_info(path)] + primary_nested_files
-        primary_media = _scan_media(combined, directory)
+    combined = direct_files + primary_nested_files
+    primary_media = _scan_media(combined, directory) if combined else []
 
     primary = None
     if primary_media:
@@ -265,7 +298,12 @@ def _scan_single_issue(
         )
 
     extras: list[ScannedGroup] = []
+    seen: set[Path] = set()
     for child in sorted(extra_dirs, key=lambda p: natural_path_key(p.relative_to(directory))):
+        resolved = child.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
         extras.extend(_scan_extra_groups(child, relative_to))
     return primary, extras
 
@@ -345,6 +383,7 @@ def scan_folder(
                 content_root,
                 extra_overrides=extra_overrides,
                 primary_overrides=primary_overrides,
+                separate_child_folders=True,
             )
             issues.append(
                 ScannedIssue(

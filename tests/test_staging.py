@@ -96,3 +96,21 @@ def test_staging_preserves_reviewed_extra_name(tmp_path: Path) -> None:
     )
     extra_names = [g.name for g in staged.issues[0].groups if g.role == "issue-extra"]
     assert extra_names == ["Extras"]
+
+
+def test_stage_series_keeps_nested_extras_under_each_issue_separate(tmp_path: Path) -> None:
+    for issue_number in (1, 2, 3):
+        issue = tmp_path / f"issue {issue_number}"
+        touch(issue / "001.jpg")
+        touch(issue / "002.jpg")
+        touch(issue / "extras" / "bonus.png")
+
+    plan = build_review_plan(scan_folder(tmp_path))
+    staged = build_staged_import(plan, author="Artist", series="Comic")
+
+    assert [issue.source_key for issue in staged.issues] == ["issue 1", "issue 2", "issue 3"]
+    for issue in staged.issues:
+        assert [(group.role, group.name, len(group.media)) for group in issue.groups] == [
+            ("primary", "Primary", 2),
+            ("issue-extra", "extras", 1),
+        ]
