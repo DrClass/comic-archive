@@ -487,3 +487,7 @@ Author-page series cards now show a compact five-line summary: series title, iss
 - Conventional primary page containers such as `Pages/`, `Images/`, `Main/`, and `Primary/` still fold into the main comic.
 - Existing one-shot import behavior remains unchanged for arbitrary nested page folders.
 - Added regression coverage for multi-issue series with nested extras and end-to-end staging preservation.
+
+### PDF import
+
+PDF files are accepted as importer input. Each PDF page is rendered at 150 DPI to an ordered PNG (`0001.png`, `0002.png`, ...), then follows the normal image import path. The source PDF is never modified. Rendered temporary pages are cleaned with their web import session, while the managed library stores ordinary PNG files. PDF rendering uses PyMuPDF, included in the `web` optional dependencies.

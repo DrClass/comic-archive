@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import tempfile
+import hashlib
 from pathlib import Path
 
 from .models import (
@@ -20,6 +22,9 @@ SUPPORTED_MEDIA: dict[str, tuple[MediaKind, str]] = {
     ".png": (MediaKind.IMAGE, "image/png"),
     ".gif": (MediaKind.IMAGE, "image/gif"),
     ".mp4": (MediaKind.VIDEO, "video/mp4"),
+    # PDF is an accepted importer input. It is expanded into PNG pages by
+    # _scan_media and is never committed to the library as a PDF.
+    ".pdf": (MediaKind.IMAGE, "application/pdf"),
 }
 
 IGNORED_FILENAMES = {"thumbs.db", ".ds_store", "desktop.ini"}
@@ -147,31 +152,68 @@ def _find_content_root(
         current = media_children[0]
 
 
-def _scan_media(files: list[Path], relative_to: Path) -> list[ScannedMedia]:
-    supported: list[tuple[Path, MediaKind, str]] = []
+def _render_pdf_pages(pdf_path: Path, relative_to: Path, pdf_cache_root: Path) -> list[tuple[Path, Path, MediaKind, str]]:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:  # pragma: no cover - dependency guard
+        raise FolderScanError("PDF import requires PyMuPDF. Reinstall with the web/import dependencies.") from exc
+
+    fingerprint = hashlib.sha256(
+        f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{pdf_path.stat().st_mtime_ns}".encode("utf-8")
+    ).hexdigest()[:20]
+    output_dir = pdf_cache_root / fingerprint
+    output_dir.mkdir(parents=True, exist_ok=True)
+    display_dir = pdf_path.relative_to(relative_to).parent / f"{pdf_path.stem}_pdf_pages"
+
+    rendered: list[tuple[Path, Path, MediaKind, str]] = []
+    try:
+        with fitz.open(pdf_path) as document:
+            if document.page_count < 1:
+                raise FolderScanError(f"PDF has no pages: {pdf_path}")
+            width = max(4, len(str(document.page_count)))
+            for page_index in range(document.page_count):
+                name = f"{page_index + 1:0{width}d}.png"
+                destination = output_dir / name
+                if not destination.is_file():
+                    page = document.load_page(page_index)
+                    pixmap = page.get_pixmap(dpi=150, alpha=False)
+                    pixmap.save(destination)
+                rendered.append((destination, display_dir / name, MediaKind.IMAGE, "image/png"))
+    except FolderScanError:
+        raise
+    except Exception as exc:
+        raise FolderScanError(f"Could not render PDF {pdf_path.name}: {exc}") from exc
+    return rendered
+
+
+def _scan_media(files: list[Path], relative_to: Path, pdf_cache_root: Path) -> list[ScannedMedia]:
+    supported: list[tuple[Path, Path, MediaKind, str]] = []
     for path in files:
         info = _media_info(path)
         if info is None:
             continue
         kind, mime = info
-        supported.append((path, kind, mime))
+        if path.suffix.casefold() == ".pdf":
+            supported.extend(_render_pdf_pages(path, relative_to, pdf_cache_root))
+        else:
+            supported.append((path, path.relative_to(relative_to), kind, mime))
 
-    supported.sort(key=lambda item: natural_path_key(item[0].relative_to(relative_to)))
+    supported.sort(key=lambda item: natural_path_key(item[1]))
 
     return [
         ScannedMedia(
             path=path,
-            relative_path=path.relative_to(relative_to),
+            relative_path=relative_path,
             media_kind=kind,
             mime_type=mime,
             size_bytes=path.stat().st_size,
             order=index,
         )
-        for index, (path, kind, mime) in enumerate(supported, start=1)
+        for index, (path, relative_path, kind, mime) in enumerate(supported, start=1)
     ]
 
 
-def _scan_extra_groups(directory: Path, relative_to: Path) -> list[ScannedGroup]:
+def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path) -> list[ScannedGroup]:
     """Scan extra content while preserving folders as distinct named groups.
 
     An extra container such as ``Extras/`` may itself contain several separately
@@ -185,7 +227,7 @@ def _scan_extra_groups(directory: Path, relative_to: Path) -> list[ScannedGroup]
         child for child in directory.iterdir()
         if child.is_file() and not _is_ignored(child) and _media_info(child)
     ]
-    direct_media = _scan_media(direct_files, directory)
+    direct_media = _scan_media(direct_files, directory, pdf_cache_root)
     if direct_media:
         groups.append(
             ScannedGroup(
@@ -201,7 +243,7 @@ def _scan_extra_groups(directory: Path, relative_to: Path) -> list[ScannedGroup]
         if child.is_dir() and _contains_supported_media(child)
     ]
     for child in sorted(child_dirs, key=lambda p: natural_path_key(p.relative_to(directory))):
-        groups.extend(_scan_extra_groups(child, relative_to))
+        groups.extend(_scan_extra_groups(child, relative_to, pdf_cache_root))
 
     return groups
 
@@ -219,6 +261,7 @@ def _scan_single_issue(
     extra_overrides: set[Path] | None = None,
     primary_overrides: set[Path] | None = None,
     separate_child_folders: bool = False,
+    pdf_cache_root: Path,
 ) -> tuple[ScannedGroup | None, list[ScannedGroup]]:
     """Scan one issue while preserving meaningful child folders as groups.
 
@@ -286,7 +329,7 @@ def _scan_single_issue(
             walk_container(child)
 
     combined = direct_files + primary_nested_files
-    primary_media = _scan_media(combined, directory) if combined else []
+    primary_media = _scan_media(combined, directory, pdf_cache_root) if combined else []
 
     primary = None
     if primary_media:
@@ -304,7 +347,7 @@ def _scan_single_issue(
         if resolved in seen:
             continue
         seen.add(resolved)
-        extras.extend(_scan_extra_groups(child, relative_to))
+        extras.extend(_scan_extra_groups(child, relative_to, pdf_cache_root))
     return primary, extras
 
 
@@ -336,8 +379,14 @@ def scan_folder(
     *,
     extra_folders: list[str | Path] | None = None,
     primary_folders: list[str | Path] | None = None,
+    pdf_cache_root: str | Path | None = None,
 ) -> ScannedImport:
     source = Path(source).expanduser().resolve()
+    if pdf_cache_root is None:
+        pdf_cache_root = Path(tempfile.mkdtemp(prefix="comic-archive-pdf-"))
+    else:
+        pdf_cache_root = Path(pdf_cache_root).expanduser().resolve()
+    pdf_cache_root.mkdir(parents=True, exist_ok=True)
     if not source.exists():
         raise FolderScanError(f"Folder does not exist: {source}")
     if not source.is_dir():
@@ -384,6 +433,7 @@ def scan_folder(
                 extra_overrides=extra_overrides,
                 primary_overrides=primary_overrides,
                 separate_child_folders=True,
+                pdf_cache_root=pdf_cache_root,
             )
             issues.append(
                 ScannedIssue(
@@ -396,13 +446,14 @@ def scan_folder(
 
         extras = []
         for child in sorted(series_extra_dirs, key=lambda p: natural_path_key(p.relative_to(content_root))):
-            extras.extend(_scan_extra_groups(child, content_root))
+            extras.extend(_scan_extra_groups(child, content_root, pdf_cache_root))
     else:
         primary, extras = _scan_single_issue(
             content_root,
             content_root,
             extra_overrides=extra_overrides,
             primary_overrides=primary_overrides,
+            pdf_cache_root=pdf_cache_root,
         )
 
     ignored_files = sorted(

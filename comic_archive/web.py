@@ -58,6 +58,7 @@ class ImportSession:
     series_default: str | None = None
     bulk_id: str | None = None
     upload_root: Path | None = None
+    pdf_cache_root: Path | None = None
     last_activity: float = field(default_factory=time.time)
 
 
@@ -320,6 +321,15 @@ def _cleanup_upload(path: Path | None) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+
+def _new_pdf_cache(staging_root: Path, upload_root: Path | None = None) -> Path:
+    if upload_root is not None:
+        root = upload_root / "pdf-rendered" / str(uuid4())
+    else:
+        root = staging_root / "pdf-rendered" / str(uuid4())
+    root.mkdir(parents=True, exist_ok=False)
+    return root
+
 def _review_role_choices(item, *, is_series: bool) -> list[ReviewRole]:
     if item.source_kind == "issue":
         return [ReviewRole.ISSUE, ReviewRole.SERIES_EXTRA]
@@ -360,6 +370,8 @@ def _touch_bulk_activity(bulk: BulkArtistSession) -> None:
 
 
 def _remove_staging_record(session: ImportSession) -> None:
+    _cleanup_upload(session.pdf_cache_root)
+    session.pdf_cache_root = None
     if session.staging_path is not None:
         try:
             session.staging_path.unlink(missing_ok=True)
@@ -465,7 +477,12 @@ def _start_bulk_item(app: FastAPI, bulk_id: str) -> str | None:
         return None
     candidate_index = bulk.selected[bulk.current_position]
     candidate = bulk.candidates[candidate_index]
-    scan = scan_folder(candidate.path)
+    pdf_cache_root = _new_pdf_cache(app.state.staging_root, bulk.upload_root)
+    try:
+        scan = scan_folder(candidate.path, pdf_cache_root=pdf_cache_root)
+    except Exception:
+        _cleanup_upload(pdf_cache_root)
+        raise
     session_id = str(uuid4())
     app.state.import_sessions[session_id] = ImportSession(
         plan=build_review_plan(scan),
@@ -473,6 +490,7 @@ def _start_bulk_item(app: FastAPI, bulk_id: str) -> str | None:
         series_default=candidate.name,
         bulk_id=bulk_id,
         upload_root=bulk.upload_root,
+        pdf_cache_root=pdf_cache_root,
     )
     return session_id
 
@@ -999,13 +1017,15 @@ def create_app(
                 _touch_bulk_activity(app.state.bulk_import_sessions[bulk_id])
                 redirect = f"/import/bulk/{bulk_id}"
             else:
-                scan = scan_folder(source_path)
+                pdf_cache_root = _new_pdf_cache(staging, upload.upload_root)
+                scan = scan_folder(source_path, pdf_cache_root=pdf_cache_root)
                 plan = build_review_plan(scan)
                 session_id = str(uuid4())
                 app.state.import_sessions[session_id] = ImportSession(
                     plan=plan,
                     series_default=scan.content_root.name,
                     upload_root=upload.upload_root,
+                    pdf_cache_root=pdf_cache_root,
                 )
                 _touch_import_activity(app, app.state.import_sessions[session_id])
                 redirect = f"/import/{session_id}/review"
@@ -1178,7 +1198,8 @@ def create_app(
         try:
             upload_root, top_level = await _save_uploaded_folder(request, staging)
             source_path = _uploaded_source(upload_root, top_level)
-            scan = scan_folder(source_path)
+            pdf_cache_root = _new_pdf_cache(staging, upload_root)
+            scan = scan_folder(source_path, pdf_cache_root=pdf_cache_root)
             plan = build_review_plan(scan)
         except HTTPException:
             _cleanup_upload(upload_root)
@@ -1197,6 +1218,7 @@ def create_app(
             plan=plan,
             series_default=scan.content_root.name,
             upload_root=upload_root,
+            pdf_cache_root=pdf_cache_root,
         )
         _touch_import_activity(app, app.state.import_sessions[session_id])
         return RedirectResponse(f"/import/{session_id}/review", status_code=303)
@@ -1207,12 +1229,13 @@ def create_app(
         selected_path = form.get("selected_path", "").strip() or form.get("source_path", "").strip()
         try:
             source_path = _safe_import_folder(imports, selected_path)
-            scan = scan_folder(source_path)
+            pdf_cache_root = _new_pdf_cache(staging)
+            scan = scan_folder(source_path, pdf_cache_root=pdf_cache_root)
             plan = build_review_plan(scan)
         except (FolderScanError, OSError) as exc:
             return templates.TemplateResponse(request=request, name="import_start.html", context={"error": str(exc), "selected_path": selected_path}, status_code=400)
         session_id = str(uuid4())
-        app.state.import_sessions[session_id] = ImportSession(plan=plan)
+        app.state.import_sessions[session_id] = ImportSession(plan=plan, pdf_cache_root=pdf_cache_root)
         return RedirectResponse(f"/import/{session_id}/review", status_code=303)
 
     @app.get("/import/{session_id}/review", response_class=HTMLResponse)
@@ -1495,6 +1518,7 @@ def create_app(
                 status_code=409 if duplicate else 400,
             )
         app.state.import_sessions.pop(session_id, None)
+        _remove_staging_record(session)
         if session.bulk_id:
             bulk = _bulk_session_or_404(app, session.bulk_id)
             bulk.imported_series.append((session.staged.series, result.series_id))

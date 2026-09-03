@@ -274,3 +274,59 @@ def test_pages_container_still_folds_into_primary(tmp_path: Path) -> None:
     assert result.primary is not None
     assert [item.relative_path.name for item in result.primary.media] == ["001.jpg", "002.jpg"]
     assert [(group.name, len(group.media)) for group in result.extras] == [("Extras", 1)]
+
+
+def test_pdf_is_expanded_into_ordered_png_pages(tmp_path):
+    import fitz
+
+    source = tmp_path / "PDF Comic"
+    source.mkdir()
+    pdf_path = source / "comic.pdf"
+    doc = fitz.open()
+    for label in ("Page one", "Page two", "Page three"):
+        page = doc.new_page(width=300, height=400)
+        page.insert_text((40, 80), label)
+    doc.save(pdf_path)
+    doc.close()
+
+    cache = tmp_path / "pdf-cache"
+    result = scan_folder(source, pdf_cache_root=cache)
+
+    assert result.primary is not None
+    assert len(result.primary.media) == 3
+    assert [item.mime_type for item in result.primary.media] == ["image/png"] * 3
+    assert [item.relative_path.as_posix() for item in result.primary.media] == [
+        "comic_pdf_pages/0001.png",
+        "comic_pdf_pages/0002.png",
+        "comic_pdf_pages/0003.png",
+    ]
+    assert all(item.path.suffix == ".png" and item.path.is_file() for item in result.primary.media)
+    assert Path(pdf_path).read_bytes().startswith(b"%PDF")
+
+
+def test_pdf_inside_issue_with_extras_stays_primary_and_extras_stay_separate(tmp_path):
+    import fitz
+
+    series = tmp_path / "Comic"
+    issue1 = series / "Issue 1"
+    issue2 = series / "Issue 2"
+    extras = issue1 / "Extras"
+    extras.mkdir(parents=True)
+    issue2.mkdir(parents=True)
+    (extras / "bonus.png").write_bytes(b"bonus")
+    (issue2 / "001.png").write_bytes(b"page")
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=300)
+    doc.new_page(width=200, height=300)
+    doc.save(issue1 / "issue.pdf")
+    doc.close()
+
+    result = scan_folder(series, pdf_cache_root=tmp_path / "pdf-cache")
+    first = next(issue for issue in result.issues if issue.name == "Issue 1")
+    assert first.primary is not None
+    assert len(first.primary.media) == 2
+    assert all(item.mime_type == "image/png" for item in first.primary.media)
+    assert len(first.extras) == 1
+    assert first.extras[0].name == "Extras"
+    assert len(first.extras[0].media) == 1

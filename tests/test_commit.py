@@ -215,3 +215,32 @@ def test_duplicate_detection_backfills_previous_milestone_rows(tmp_path: Path) -
     )
     with pytest.raises(CommitError, match="Exact content match"):
         commit_staged_import(new_stage, **kwargs)
+
+
+def test_pdf_pages_commit_as_png_files(tmp_path):
+    import fitz
+
+    source = tmp_path / "source"
+    source.mkdir()
+    doc = fitz.open()
+    doc.new_page(width=200, height=300)
+    doc.new_page(width=200, height=300)
+    doc.save(source / "comic.pdf")
+    doc.close()
+
+    scan = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+    staged = build_staged_import(
+        build_review_plan(scan),
+        author="PDF Artist",
+        series="PDF Comic",
+    )
+    library = tmp_path / "library"
+    result = commit_staged_import(
+        staged,
+        library_root=library,
+        database_path=tmp_path / "archive.sqlite3",
+    )
+
+    stored = sorted((library / "series" / result.series_id / "groups").rglob("*.png"))
+    assert len(stored) == 2
+    assert all(path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for path in stored)
