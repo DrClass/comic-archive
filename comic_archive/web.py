@@ -20,7 +20,7 @@ from .importer.commit import CommitError, commit_staged_import, initialize_datab
 from .importer.review import ReviewError, ReviewPlan, ReviewRole, build_review_plan
 from .importer.scanner import FolderScanError, scan_folder
 from .importer.bulk import BulkComicCandidate, discover_artist_comics
-from .importer.staging import StagedImport, StagingError, build_staged_import, create_staged_issue_extra, move_staged_media
+from .importer.staging import StagedImport, StagingError, build_staged_import, create_staged_issue_extra, move_staged_media, remove_empty_staged_group
 from .library import AuthorView, GroupView, IssueView, MediaView, SeriesView, read_library
 from .editing import EditError, create_issue_extra_group, edit_issue, edit_series, get_history, move_extra_group, move_media_to_group, rename_author, rename_group, reorder_media, set_media_active
 from .thumbnails import THUMBNAIL_MIME, ensure_thumbnail
@@ -1083,6 +1083,7 @@ def create_app(
     @app.get("/import/bulk/{bulk_id}", response_class=HTMLResponse)
     def bulk_import_choose(request: Request, bulk_id: str):
         bulk = _bulk_session_or_404(app, bulk_id)
+        _touch_bulk_activity(bulk)
         return templates.TemplateResponse(
             request=request,
             name="import_bulk_choose.html",
@@ -1217,6 +1218,7 @@ def create_app(
     @app.get("/import/{session_id}/review", response_class=HTMLResponse)
     def import_review(request: Request, session_id: str):
         session = _session_or_404(app, session_id)
+        _touch_import_activity(app, session)
         role_choices = {
             index: _review_role_choices(item, is_series=session.plan.scan.is_series_candidate)
             for index, item in enumerate(session.plan.items)
@@ -1256,6 +1258,7 @@ def create_app(
     @app.get("/import/{session_id}/metadata", response_class=HTMLResponse)
     def import_metadata(request: Request, session_id: str):
         session = _session_or_404(app, session_id)
+        _touch_import_activity(app, session)
         if session.plan.scan.is_series_candidate:
             issue_items = [item for item in session.plan.items if item.role is ReviewRole.ISSUE]
         else:
@@ -1270,6 +1273,7 @@ def create_app(
                 "series_default": session.series_default or session.plan.scan.content_root.name,
                 "author_value": session.author_default or "",
                 "series_value": session.series_default or "",
+                "series_complete_value": "",
                 "error": None,
             },
         )
@@ -1299,7 +1303,10 @@ def create_app(
                 "complete": form.get("complete_0", ""),
             }
         try:
-            staged = build_staged_import(session.plan, author=author, series=series, issue_metadata=issue_metadata)
+            staged = build_staged_import(
+                session.plan, author=author, series=series, issue_metadata=issue_metadata,
+                series_complete=_bool_form(form.get("series_complete", "")),
+            )
             staging.mkdir(parents=True, exist_ok=True)
             staging_path = staged.save(staging / f"{staged.staging_id}.json")
             session.staged = staged
@@ -1316,6 +1323,7 @@ def create_app(
                     "error": str(exc),
                     "author_value": author,
                     "series_value": series,
+                    "series_complete_value": form.get("series_complete", ""),
                 },
                 status_code=400,
             )
@@ -1324,6 +1332,7 @@ def create_app(
     @app.get("/import/{session_id}/organize", response_class=HTMLResponse)
     def import_organize(request: Request, session_id: str):
         session = _session_or_404(app, session_id)
+        _touch_import_activity(app, session)
         if session.staged is None:
             return RedirectResponse(f"/import/{session_id}/metadata", status_code=303)
         return templates.TemplateResponse(
@@ -1340,7 +1349,26 @@ def create_app(
         form = await _form_data(request)
         _touch_import_activity(app, session)
         action = form.get("action", "continue")
+
+        def save_assignments() -> None:
+            assignments: list[tuple[str, str, str]] = []
+            for issue_index, issue in enumerate(session.staged.issues):
+                media_index = 0
+                for group in issue.groups:
+                    for media in list(group.media):
+                        target_path = form.get(
+                            f"target_{issue_index}_{media_index}",
+                            group.relative_path,
+                        )
+                        assignments.append((issue.source_key, media.source_path, target_path))
+                        media_index += 1
+            for issue_key, source_path, target_path in assignments:
+                move_staged_media(session.staged, issue_key, source_path, target_path)
+
         try:
+            # Every organizer submit saves pending file movements first. This
+            # prevents Create/Remove group actions from discarding unsaved work.
+            save_assignments()
             if action.startswith("create:"):
                 issue_index = int(action.split(":", 1)[1])
                 issue = session.staged.issues[issue_index]
@@ -1349,21 +1377,27 @@ def create_app(
                     issue.source_key,
                     form.get(f"new_group_{issue_index}", ""),
                 )
+            elif action.startswith("remove-empty:"):
+                _, issue_text, group_text = action.split(":", 2)
+                issue = session.staged.issues[int(issue_text)]
+                group = issue.groups[int(group_text)]
+                remove_empty_staged_group(session.staged, issue.source_key, group.relative_path)
             else:
-                assignments: list[tuple[str, str, str]] = []
-                for issue_index, issue in enumerate(session.staged.issues):
-                    media_index = 0
-                    for group in issue.groups:
-                        for media in list(group.media):
-                            target_path = form.get(
-                                f"target_{issue_index}_{media_index}",
-                                group.relative_path,
-                            )
-                            assignments.append((issue.source_key, media.source_path, target_path))
-                            media_index += 1
-                for issue_key, source_path, target_path in assignments:
-                    move_staged_media(session.staged, issue_key, source_path, target_path)
+                empty = [
+                    group.name
+                    for issue in session.staged.issues
+                    for group in issue.groups
+                    if not group.media
+                ]
+                if empty:
+                    names = ", ".join(empty)
+                    raise StagingError(
+                        f"Empty content group{'s' if len(empty) != 1 else ''}: {names}. "
+                        "Move files into the group, remove the empty extra group, or continue editing before import."
+                    )
         except (StagingError, ValueError, IndexError) as exc:
+            if session.staging_path is not None:
+                session.staged.save(session.staging_path)
             return templates.TemplateResponse(
                 request=request,
                 name="import_organize.html",
@@ -1373,13 +1407,28 @@ def create_app(
 
         if session.staging_path is not None:
             session.staged.save(session.staging_path)
-        if action.startswith("create:"):
+        if action.startswith("create:") or action.startswith("remove-empty:"):
             return RedirectResponse(f"/import/{session_id}/organize", status_code=303)
         return RedirectResponse(f"/import/{session_id}/confirm", status_code=303)
+
+    @app.post("/import/{session_id}/keepalive")
+    async def import_keepalive(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        await _form_data(request)
+        _touch_import_activity(app, session)
+        return Response(status_code=204)
+
+    @app.post("/import/bulk/{bulk_id}/keepalive")
+    async def bulk_keepalive(request: Request, bulk_id: str):
+        bulk = _bulk_session_or_404(app, bulk_id)
+        await _form_data(request)
+        _touch_bulk_activity(bulk)
+        return Response(status_code=204)
 
     @app.get("/import/{session_id}/confirm", response_class=HTMLResponse)
     def import_confirm(request: Request, session_id: str):
         session = _session_or_404(app, session_id)
+        _touch_import_activity(app, session)
         if session.staged is None:
             return RedirectResponse(f"/import/{session_id}/metadata", status_code=303)
         return templates.TemplateResponse(
@@ -1696,7 +1745,11 @@ def create_app(
         author, series = found
         form = await _form_data(request)
         try:
-            edit_series(database, series_id, title=form.get("title", ""), author_id=form.get("author_id", author.id))
+            edit_series(
+                database, series_id, title=form.get("title", ""),
+                author_id=form.get("author_id", author.id),
+                complete=_bool_form(form.get("complete", "")),
+            )
         except EditError as exc:
             return templates.TemplateResponse(
                 request=request, name="edit_series.html",

@@ -5,7 +5,7 @@
 <div class="page-heading">
   <div>
     <h1>{{ series.title }}</h1>
-    <p class="muted">by {{ author.name }}{% if series.updated_at %} · Modified {{ series.updated_at[:10] }}{% endif %}</p>
+    <p class="muted">by {{ author.name }} · {% if series.complete is sameas true %}Series complete{% elif series.complete is sameas false %}Series incomplete{% else %}Series completeness unknown{% endif %}{% if series.updated_at %} · Modified {{ series.updated_at[:10] }}{% endif %}</p>
   </div>
   {% if request.state.user.is_admin %}<a class="admin-link" href="/series/{{ series.id }}/edit">Edit series</a>{% endif %}
 </div>

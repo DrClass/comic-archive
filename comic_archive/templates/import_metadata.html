@@ -7,6 +7,7 @@
 <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
 <div class="form-row"><label for="author">Author</label><input id="author" name="author" type="text" required value="{{ author_value or '' }}"></div>
 <div class="form-row"><label for="series">Series</label><input id="series" name="series" type="text" required value="{{ series_value or series_default }}"></div>
+<div class="form-row"><label for="series_complete">Series completeness</label><select id="series_complete" name="series_complete"><option value="" {% if not series_complete_value %}selected{% endif %}>Unknown</option><option value="yes" {% if series_complete_value == 'yes' %}selected{% endif %}>Complete</option><option value="no" {% if series_complete_value == 'no' %}selected{% endif %}>Incomplete</option></select></div>
 <h2>Issues</h2>
 {% for item in issue_items %}
 <fieldset class="card" style="margin-bottom:.8rem"><legend>{% if item %}{{ item.name }}{% else %}Imported issue{% endif %}</legend>

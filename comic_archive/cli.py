@@ -310,6 +310,7 @@ def main() -> int:
     e_series.add_argument("series_id")
     e_series.add_argument("--title")
     e_series.add_argument("--author-id")
+    e_series.add_argument("--complete", choices=["yes", "no", "unknown"])
 
     e_issue = edit_sub.add_parser("issue", help="Edit an issue")
     e_issue.add_argument("issue_id")
@@ -404,6 +405,8 @@ def main() -> int:
                 kwargs = {}
                 if args.title is not None: kwargs["title"] = args.title
                 if args.author_id is not None: kwargs["author_id"] = args.author_id
+                if args.complete is not None:
+                    kwargs["complete"] = None if args.complete == "unknown" else args.complete == "yes"
                 edit_series(args.database, args.series_id, **kwargs)
             elif args.edit_command == "issue":
                 kwargs = {}

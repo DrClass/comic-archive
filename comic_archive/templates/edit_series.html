@@ -10,6 +10,7 @@
   <div class="form-row"><label for="author_id">Author</label><select id="author_id" name="author_id">
   {% for choice in authors %}<option value="{{ choice.id }}" {% if choice.id == author.id %}selected{% endif %}>{{ choice.name }}</option>{% endfor %}
   </select></div>
+  <div class="form-row"><label for="complete">Completeness</label><select id="complete" name="complete"><option value="" {% if series.complete is none %}selected{% endif %}>Unknown</option><option value="yes" {% if series.complete is sameas true %}selected{% endif %}>Complete</option><option value="no" {% if series.complete is sameas false %}selected{% endif %}>Incomplete</option></select></div>
   <button type="submit">Save changes</button>
 </form>
 {% endblock %}

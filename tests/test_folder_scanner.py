@@ -211,3 +211,18 @@ def test_one_issue_plus_series_extra_is_not_unwrapped(tmp_path: Path) -> None:
     assert [issue.name for issue in result.issues] == ["1"]
     assert [group.name for group in result.issues[0].extras] == ["Textless"]
     assert [group.name for group in result.extras] == ["Covers"]
+
+
+def test_nested_extra_below_page_container_is_not_flattened_into_primary(tmp_path: Path) -> None:
+    touch(tmp_path / "Pages" / "001.jpg")
+    touch(tmp_path / "Pages" / "002.jpg")
+    touch(tmp_path / "Pages" / "Extras" / "bonus.png")
+
+    result = scan_folder(tmp_path)
+
+    assert result.primary is not None
+    assert [str(item.relative_path) for item in result.primary.media] == ["001.jpg", "002.jpg"]
+    assert [(group.name, str(group.relative_path)) for group in result.extras] == [
+        ("Extras", "Extras")
+    ]
+    assert [item.relative_path.name for item in result.extras[0].media] == ["bonus.png"]

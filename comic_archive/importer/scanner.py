@@ -217,9 +217,28 @@ def _scan_single_issue(
     primary_media = _scan_media(direct_files, directory)
 
     # Non-extra subfolders are allowed to be page containers (e.g. Pages/).
-    # Their media is folded into primary. Extra-like subfolders are kept apart.
+    # Their media is folded into primary. Extra-like folders are kept apart even
+    # when they are nested below a neutral page/container folder.
     extra_dirs: list[Path] = []
     primary_nested_files: list[Path] = []
+
+    def walk_container(container: Path) -> None:
+        for child in container.iterdir():
+            if child.is_file():
+                if not _is_ignored(child) and _media_info(child):
+                    primary_nested_files.append(child)
+                continue
+            if not child.is_dir() or not _contains_supported_media(child):
+                continue
+            if _looks_like_extra(
+                child,
+                extra_overrides=extra_overrides,
+                primary_overrides=primary_overrides,
+            ):
+                extra_dirs.append(child)
+            else:
+                walk_container(child)
+
     for child in directory.iterdir():
         if not child.is_dir() or not _contains_supported_media(child):
             continue
@@ -230,7 +249,7 @@ def _scan_single_issue(
         ):
             extra_dirs.append(child)
         else:
-            primary_nested_files.extend(path for path in child.rglob("*") if path.is_file())
+            walk_container(child)
 
     if primary_nested_files:
         combined = [path for path in direct_files if _media_info(path)] + primary_nested_files

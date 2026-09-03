@@ -42,6 +42,7 @@ class IssueView:
 class SeriesView:
     id: str
     title: str
+    complete: bool | None = None
     updated_at: str | None = None
     issues: list[IssueView] = field(default_factory=list)
     extras: list[GroupView] = field(default_factory=list)
@@ -66,10 +67,10 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
         for author_row in db.execute("SELECT id, name FROM authors ORDER BY name COLLATE NOCASE"):
             author = AuthorView(id=author_row["id"], name=author_row["name"])
             for series_row in db.execute(
-                "SELECT id, title, updated_at FROM series WHERE author_id = ? ORDER BY title COLLATE NOCASE",
+                "SELECT id, title, complete, updated_at FROM series WHERE author_id = ? ORDER BY title COLLATE NOCASE",
                 (author.id,),
             ):
-                series = SeriesView(id=series_row["id"], title=series_row["title"], updated_at=series_row["updated_at"])
+                series = SeriesView(id=series_row["id"], title=series_row["title"], complete=_bool_or_none(series_row["complete"]), updated_at=series_row["updated_at"])
                 for issue_row in db.execute(
                     """SELECT id, issue_number, title, complete, updated_at
                        FROM issues WHERE series_id = ?

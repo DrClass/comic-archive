@@ -56,6 +56,7 @@ class StagedImport:
     author: str
     series: str
     import_kind: str
+    series_complete: bool | None = None
     issues: list[StagedIssue] = field(default_factory=list)
     series_extras: list[StagedGroup] = field(default_factory=list)
 
@@ -129,6 +130,7 @@ def build_staged_import(
     author: str,
     series: str,
     issue_metadata: dict[str, dict[str, object]] | None = None,
+    series_complete: bool | None = None,
 ) -> StagedImport:
     errors = plan.validation_errors()
     if errors:
@@ -230,6 +232,7 @@ def build_staged_import(
         content_root=str(plan.scan.content_root),
         author=author.strip(),
         series=series.strip(),
+        series_complete=series_complete,
         import_kind="series" if plan.scan.is_series_candidate else "issue",
         issues=list(staged_issues.values()),
         series_extras=series_extras,
@@ -258,6 +261,20 @@ def create_staged_issue_extra(staged: StagedImport, issue_key: str, name: str) -
         )
     )
     return group_key
+
+
+def remove_empty_staged_group(staged: StagedImport, issue_key: str, group_path: str) -> None:
+    issue = next((item for item in staged.issues if item.source_key == issue_key), None)
+    if issue is None:
+        raise StagingError(f"Staged issue not found: {issue_key}")
+    group = next((item for item in issue.groups if item.relative_path == group_path), None)
+    if group is None:
+        raise StagingError(f"Staged group not found: {group_path}")
+    if group.role == ReviewRole.PRIMARY.value:
+        raise StagingError("The primary comic group cannot be removed")
+    if group.media:
+        raise StagingError("Only empty extra groups can be removed")
+    issue.groups.remove(group)
 
 
 def move_staged_media(

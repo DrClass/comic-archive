@@ -99,23 +99,25 @@ def edit_series(
     *,
     title: str | object = _UNSET,
     author_id: str | object = _UNSET,
+    complete: bool | None | object = _UNSET,
 ) -> None:
     with _connect(database_path) as db:
-        row = db.execute("SELECT id, author_id, title FROM series WHERE id = ?", (series_id,)).fetchone()
+        row = db.execute("SELECT id, author_id, title, complete FROM series WHERE id = ?", (series_id,)).fetchone()
         if not row:
             raise EditError(f"Series not found: {series_id}")
-        before = _row_dict(row, ("author_id", "title"))
+        before = _row_dict(row, ("author_id", "title", "complete"))
         new_title = row["title"] if title is _UNSET else str(title).strip()
         new_author = row["author_id"] if author_id is _UNSET else str(author_id)
         if not new_title:
             raise EditError("Series title cannot be empty")
         if not db.execute("SELECT 1 FROM authors WHERE id = ?", (new_author,)).fetchone():
             raise EditError(f"Author not found: {new_author}")
-        after = {"author_id": new_author, "title": new_title}
+        new_complete = row["complete"] if complete is _UNSET else (None if complete is None else int(complete))
+        after = {"author_id": new_author, "title": new_title, "complete": new_complete}
         if before == after:
             return
         try:
-            db.execute("UPDATE series SET author_id = ?, title = ? WHERE id = ?", (new_author, new_title, series_id))
+            db.execute("UPDATE series SET author_id = ?, title = ?, complete = ? WHERE id = ?", (new_author, new_title, new_complete, series_id))
         except sqlite3.IntegrityError as exc:
             raise EditError("That author already has a series with this title") from exc
         _audit(db, entity_type="series", entity_id=series_id, action="edit", before=before, after=after)

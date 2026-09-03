@@ -1,4 +1,4 @@
-# Comic Archive
+# Comic Archive — Milestone 4: Commit layer
 
 Current importer workflow:
 
@@ -467,3 +467,12 @@ For reverse-proxy deployment, request-body limits now generally need to accommod
 
 Fixed a production-only login failure exposed by browser background requests such as `/favicon.ico`. Anonymous requests to protected paths now preserve the existing session CSRF token instead of clearing the session and generating a new token while the login form is open. Invalid/stale authenticated sessions still have authentication state cleared, but their existing CSRF token is preserved when possible. `/favicon.ico` now returns HTTP 204 without entering the authentication redirect flow. Regression coverage includes secure cookies over an HTTPS TestClient, favicon access between login GET and POST, and anonymous protected requests preserving the login CSRF token.
 
+
+## Milestone 23 improvements
+
+- Author series cards now list the primary page count for every issue.
+- Series have independent completeness metadata: Unknown, Complete, or Incomplete. It can be set during web import, in the series editor, or with `edit series --complete`.
+- Active import/review pages send a CSRF-protected keepalive every two minutes while visible, and normal importer page navigation also refreshes activity. The existing 12-hour cleanup now applies to genuinely inactive sessions. Server process restarts still clear in-memory import sessions.
+- Extra-like folders nested beneath neutral page/container directories are preserved as extras instead of being flattened into primary comic pages.
+- Organizer Create/Remove group actions first save all current file-to-group selections, so their page reload no longer discards pending moves.
+- The organizer blocks continuation when any content group is empty, identifies the empty group, and allows empty extra groups to be removed. Commit validation also rejects empty groups as a final safeguard.

@@ -21,6 +21,15 @@
     </div>
   </div>
 
+  <div class="group-status-list">
+    {% for group in issue.groups %}
+      <div class="row">
+        <span>{{ "Main comic" if group.role == "primary" else group.name }} · {{ group.media|length }} file{% if group.media|length != 1 %}s{% endif %}{% if not group.media %} · <strong>Empty</strong>{% endif %}</span>
+        {% if not group.media and group.role != "primary" %}<button type="submit" name="action" value="remove-empty:{{ issue_index }}:{{ loop.index0 }}">Remove empty group</button>{% endif %}
+      </div>
+    {% endfor %}
+  </div>
+
   <table class="review-table">
     <thead><tr><th>File</th><th>Current group</th><th>Put in</th></tr></thead>
     <tbody>

@@ -226,5 +226,28 @@
   {% endif %}
 </header>
 <main>{% block content %}{% endblock %}</main>
+
+<script>
+(() => {
+  const path = window.location.pathname;
+  let keepalive = null;
+  let match = path.match(/^\/import\/bulk\/([^/]+)(?:\/|$)/);
+  if (match && !path.includes('/upload-session')) {
+    keepalive = `/import/bulk/${match[1]}/keepalive`;
+  } else {
+    match = path.match(/^\/import\/([^/]+)\/(?:review|metadata|organize|confirm)(?:\/|$)/);
+    if (match) keepalive = `/import/${match[1]}/keepalive`;
+  }
+  if (!keepalive) return;
+  const token = {{ request.session.get('csrf_token', '')|tojson }};
+  const ping = () => {
+    if (document.visibilityState !== 'visible') return;
+    const body = new URLSearchParams({csrf_token: token});
+    fetch(keepalive, {method: 'POST', body, credentials: 'same-origin'}).catch(() => {});
+  };
+  window.setInterval(ping, 2 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') ping(); });
+})();
+</script>
 </body>
 </html>

@@ -2055,3 +2055,116 @@ def test_import_pages_use_resumable_file_by_file_upload_ui(tmp_path: Path):
         assert "Resume upload" in response.text
         assert "/file" in response.text
         assert "/finalize" in response.text
+
+
+def test_author_page_reports_page_count_for_each_issue(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    client = _admin_client(database, library)
+
+    response = client.get(f"/authors/{result.author_id}")
+    assert response.status_code == 200
+    assert "Issue 1: 1 page" in response.text
+
+
+def test_series_completeness_can_be_edited_in_web_ui(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    client = _admin_client(database, library)
+
+    response = _post(
+        client,
+        f"/series/{result.series_id}/edit",
+        data={"title": "Example Comic", "author_id": result.author_id, "complete": "no"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert read_library(database)[0].series[0].complete is False
+    page = client.get(f"/series/{result.series_id}")
+    assert "Series incomplete" in page.text
+
+
+def test_import_keepalive_marks_active_bulk_work_as_recent(tmp_path: Path):
+    artist_root = tmp_path / "Artist"
+    comic = artist_root / "Comic"
+    comic.mkdir(parents=True)
+    (comic / "001.jpg").write_bytes(b"page")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/bulk/scan", data={"source_path": str(artist_root)}, follow_redirects=False)
+    assert response.status_code == 303
+    bulk_id = response.headers["location"].split("/")[3]
+    bulk = client.app.state.bulk_import_sessions[bulk_id]
+    bulk.last_activity = time.time() - 3600
+
+    before = bulk.last_activity
+    response = _post(client, f"/import/bulk/{bulk_id}/keepalive")
+    assert response.status_code == 204
+    assert bulk.last_activity > before
+
+
+def test_organizer_group_actions_preserve_moves_and_block_empty_groups(tmp_path: Path):
+    source = tmp_path / "incoming" / "Issue"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"one")
+    (source / "002.jpg").write_bytes(b"two")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    review_url = response.headers["location"]
+    session_id = review_url.split("/")[2]
+    response = _post(client, review_url, data={"name_0": "Issue", "role_0": "primary"}, follow_redirects=False)
+    response = _post(
+        client,
+        response.headers["location"],
+        data={"author": "Artist", "series": "Comic", "issue_number_0": "1", "complete_0": "yes"},
+        follow_redirects=False,
+    )
+    organize_url = response.headers["location"]
+
+    response = _post(client, organize_url, data={"new_group_0": "Bonus", "action": "create:0"}, follow_redirects=False)
+    assert response.status_code == 303
+    staged_issue = client.app.state.import_sessions[session_id].staged.issues[0]
+    primary = next(group for group in staged_issue.groups if group.role == "primary")
+    bonus = next(group for group in staged_issue.groups if group.name == "Bonus")
+
+    # Create a second group while also moving a page. The move must be saved
+    # before the page reload caused by group creation.
+    response = _post(
+        client,
+        organize_url,
+        data={
+            "new_group_0": "Textless",
+            "action": "create:0",
+            "target_0_0": primary.relative_path,
+            "target_0_1": bonus.relative_path,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    staged_issue = client.app.state.import_sessions[session_id].staged.issues[0]
+    bonus = next(group for group in staged_issue.groups if group.name == "Bonus")
+    textless = next(group for group in staged_issue.groups if group.name == "Textless")
+    assert [media.relative_path for media in bonus.media] == ["002.jpg"]
+    assert textless.media == []
+
+    # Continuing with an empty group stays in the organizer and explains it.
+    response = _post(client, organize_url, data={"action": "continue"}, follow_redirects=False)
+    assert response.status_code == 400
+    assert "Empty content group" in response.text
+    assert "Remove empty group" in response.text
+
+    staged_issue = client.app.state.import_sessions[session_id].staged.issues[0]
+    empty_index = next(i for i, group in enumerate(staged_issue.groups) if group.name == "Textless")
+    response = _post(
+        client,
+        organize_url,
+        data={"action": f"remove-empty:0:{empty_index}"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert all(group.name != "Textless" for group in client.app.state.import_sessions[session_id].staged.issues[0].groups)

@@ -167,3 +167,22 @@ def test_history_resolves_human_readable_labels_and_hides_legacy_noops(tmp_path:
     assert "Artist / Comic / 1 / Primary" in row["entity_label"]
     assert row["before_display"] == ["001.jpg", "002.jpg"]
     assert row["after_display"] == ["002.jpg", "001.jpg"]
+
+
+def test_edit_series_completeness(tmp_path: Path) -> None:
+    from comic_archive.importer.scanner import scan_folder
+    from comic_archive.importer.review import build_review_plan
+    from comic_archive.importer.staging import build_staged_import
+    from comic_archive.importer.commit import commit_staged_import
+    from comic_archive.library import read_library
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "001.jpg").write_bytes(b"one")
+    staged = build_staged_import(build_review_plan(scan_folder(source)), author="Artist", series="Series")
+    result = commit_staged_import(staged, library_root=tmp_path / "library", database_path=tmp_path / "db.sqlite3")
+
+    edit_series(tmp_path / "db.sqlite3", result.series_id, complete=False)
+    assert read_library(tmp_path / "db.sqlite3")[0].series[0].complete is False
+    edit_series(tmp_path / "db.sqlite3", result.series_id, complete=None)
+    assert read_library(tmp_path / "db.sqlite3")[0].series[0].complete is None

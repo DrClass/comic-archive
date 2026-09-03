@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS series (
     id TEXT PRIMARY KEY,
     author_id TEXT NOT NULL REFERENCES authors(id) ON DELETE CASCADE,
     title TEXT NOT NULL COLLATE NOCASE,
+    complete INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(author_id, title)
@@ -132,6 +133,8 @@ def _ensure_schema_columns(db: sqlite3.Connection) -> None:
     if "active" not in media_columns:
         db.execute("ALTER TABLE media ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
     series_columns = {row[1] for row in db.execute("PRAGMA table_info(series)")}
+    if "complete" not in series_columns:
+        db.execute("ALTER TABLE series ADD COLUMN complete INTEGER")
     if "created_at" not in series_columns:
         db.execute("ALTER TABLE series ADD COLUMN created_at TEXT")
     if "updated_at" not in series_columns:
@@ -366,6 +369,7 @@ def load_staged_import(path: str | Path) -> StagedImport:
             content_root=data["content_root"],
             author=data["author"],
             series=data["series"],
+            series_complete=data.get("series_complete"),
             import_kind=data["import_kind"],
             issues=[issue(x) for x in data.get("issues", [])],
             series_extras=[group(x) for x in data.get("series_extras", [])],
@@ -389,6 +393,9 @@ def validate_staged_sources(staged: StagedImport) -> list[str]:
     for issue in staged.issues:
         all_groups.extend(issue.groups)
     for group in all_groups:
+        if not group.media:
+            errors.append(f"Empty content group: {group.name}")
+            continue
         for item in group.media:
             source = Path(item.source_path)
             if not source.is_file():
@@ -416,17 +423,22 @@ def _find_or_create_author(db: sqlite3.Connection, name: str) -> str:
     return author_id
 
 
-def _find_or_create_series(db: sqlite3.Connection, author_id: str, title: str) -> str:
+def _find_or_create_series(
+    db: sqlite3.Connection, author_id: str, title: str, complete: bool | None = None
+) -> str:
     row = db.execute(
-        "SELECT id FROM series WHERE author_id = ? AND title = ? COLLATE NOCASE",
+        "SELECT id, complete FROM series WHERE author_id = ? AND title = ? COLLATE NOCASE",
         (author_id, title),
     ).fetchone()
+    complete_value = None if complete is None else int(complete)
     if row:
+        if complete is not None and row[1] != complete_value:
+            db.execute("UPDATE series SET complete = ? WHERE id = ?", (complete_value, row[0]))
         return row[0]
     series_id = str(uuid4())
     db.execute(
-        "INSERT INTO series(id, author_id, title) VALUES (?, ?, ?)",
-        (series_id, author_id, title),
+        "INSERT INTO series(id, author_id, title, complete) VALUES (?, ?, ?, ?)",
+        (series_id, author_id, title, complete_value),
     )
     return series_id
 
@@ -538,7 +550,7 @@ def commit_staged_import(
                 )
 
             author_id = _find_or_create_author(db, staged.author)
-            series_id = _find_or_create_series(db, author_id, staged.series)
+            series_id = _find_or_create_series(db, author_id, staged.series, staged.series_complete)
 
             for issue in staged.issues:
                 issue_id = str(uuid4())
