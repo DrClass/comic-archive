@@ -12,6 +12,7 @@ class ReviewRole(str, Enum):
     PRIMARY = "primary"
     ISSUE_EXTRA = "issue-extra"
     SERIES_EXTRA = "series-extra"
+    SUBSERIES = "sub-series"
 
 
 class ReviewError(ValueError):
@@ -34,6 +35,7 @@ class ReviewItem:
     default_name: str | None = None
     issue_path: Path | None = None
     source_kind: str = "group"
+    series_path: Path = Path(".")
 
     def __post_init__(self) -> None:
         if self.default_name is None:
@@ -102,6 +104,10 @@ class ReviewPlan:
                 errors.append("Series review has no folders classified as issues.")
 
         for item in self.items:
+            if item.source_kind == "subseries" and item.role is not ReviewRole.SUBSERIES:
+                errors.append(f"{item.relative_path}: nested series containers must remain sub-series during this import.")
+
+        for item in self.items:
             if item.role is ReviewRole.ISSUE_EXTRA and item.issue_path is None:
                 errors.append(
                     f"{item.relative_path}: issue-extra needs an issue owner. "
@@ -135,7 +141,7 @@ def _issue_media_count(issue: ScannedIssue) -> int:
 
 
 def _validate_role_for_item(item: ReviewItem, role: ReviewRole) -> None:
-    if item.source_kind == "issue" and role in {ReviewRole.PRIMARY, ReviewRole.ISSUE_EXTRA}:
+    if item.source_kind == "issue" and role in {ReviewRole.PRIMARY, ReviewRole.ISSUE_EXTRA, ReviewRole.SUBSERIES}:
         raise ReviewError(
             f"{item.relative_path} is an issue container; it can be classified as "
             f"'{ReviewRole.ISSUE.value}' or '{ReviewRole.SERIES_EXTRA.value}', not '{role.value}'."
@@ -187,6 +193,18 @@ def build_review_plan(scan: ScannedImport) -> ReviewPlan:
     items: list[ReviewItem] = []
 
     if scan.is_series_candidate:
+        for nested in scan.subseries:
+            items.append(
+                ReviewItem(
+                    relative_path=nested.relative_path,
+                    name=nested.name,
+                    default_role=ReviewRole.SUBSERIES,
+                    role=ReviewRole.SUBSERIES,
+                    media_count=sum(issue.media_count for issue in scan.issues if issue.series_path == nested.relative_path),
+                    source_kind="subseries",
+                    series_path=nested.parent_path,
+                )
+            )
         for issue in scan.issues:
             items.append(
                 ReviewItem(
@@ -196,6 +214,7 @@ def build_review_plan(scan: ScannedImport) -> ReviewPlan:
                     role=ReviewRole.ISSUE,
                     media_count=_issue_media_count(issue),
                     source_kind="issue",
+                    series_path=issue.series_path,
                 )
             )
             for extra in issue.extras:
@@ -208,6 +227,7 @@ def build_review_plan(scan: ScannedImport) -> ReviewPlan:
                         media_count=len(extra.media),
                         issue_path=issue.relative_path,
                         source_kind="group",
+                        series_path=issue.series_path,
                     )
                 )
 
@@ -220,6 +240,7 @@ def build_review_plan(scan: ScannedImport) -> ReviewPlan:
                     role=ReviewRole.SERIES_EXTRA,
                     media_count=len(extra.media),
                     source_kind="group",
+                    series_path=extra.series_path,
                 )
             )
     else:

@@ -10,7 +10,7 @@ from uuid import uuid4
 from .models import ScannedGroup, ScannedIssue, ScannedMedia, SuggestedRole
 from .review import ReviewPlan, ReviewRole
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StagingError(ValueError):
@@ -38,12 +38,22 @@ class StagedGroup:
 
 
 @dataclass(slots=True)
+class StagedSeries:
+    source_key: str
+    title: str
+    parent_key: str
+    complete: bool | None = None
+    sort_order: int | None = None
+
+
+@dataclass(slots=True)
 class StagedIssue:
     source_key: str
     issue_number: str | None
     title: str | None
     complete: bool | None
     sort_order: int | None = None
+    series_key: str = "."
     groups: list[StagedGroup] = field(default_factory=list)
 
 
@@ -59,6 +69,7 @@ class StagedImport:
     import_kind: str
     series_complete: bool | None = None
     issues: list[StagedIssue] = field(default_factory=list)
+    subseries: list[StagedSeries] = field(default_factory=list)
     series_extras: list[StagedGroup] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,6 +142,7 @@ def build_staged_import(
     author: str,
     series: str,
     issue_metadata: dict[str, dict[str, object]] | None = None,
+    subseries_metadata: dict[str, dict[str, object]] | None = None,
     series_complete: bool | None = None,
 ) -> StagedImport:
     errors = plan.validation_errors()
@@ -142,10 +154,26 @@ def build_staged_import(
         raise StagingError("Series is required")
 
     issue_metadata = issue_metadata or {}
+    subseries_metadata = subseries_metadata or {}
     staged_issues: dict[str, StagedIssue] = {}
+    staged_subseries: list[StagedSeries] = []
     series_extras: list[StagedGroup] = []
 
     if plan.scan.is_series_candidate:
+        sibling_orders: dict[str, int] = {}
+        for item in plan.items:
+            if item.source_kind == "subseries" and item.role is ReviewRole.SUBSERIES:
+                parent_key = str(item.series_path)
+                sibling_orders[parent_key] = sibling_orders.get(parent_key, 0) + 1
+                meta = subseries_metadata.get(str(item.relative_path), {})
+                staged_subseries.append(StagedSeries(
+                    source_key=str(item.relative_path),
+                    title=item.name,
+                    parent_key=parent_key,
+                    complete=_optional_bool(meta.get("complete")),
+                    sort_order=_optional_int(meta.get("sort_order")) or sibling_orders[parent_key],
+                ))
+
         for item in plan.items:
             key = str(item.relative_path)
             if item.source_kind == "issue":
@@ -158,6 +186,7 @@ def build_staged_import(
                         title=_optional_text(meta.get("title")),
                         complete=_optional_bool(meta.get("complete")),
                         sort_order=_optional_int(meta.get("sort_order")),
+                        series_key=str(item.series_path),
                     )
                     if issue.primary:
                         staged.groups.append(_group(issue.primary, ReviewRole.PRIMARY, "issue", key))
@@ -166,7 +195,7 @@ def build_staged_import(
                         if extra_item.role is ReviewRole.ISSUE_EXTRA:
                             staged.groups.append(_group(extra, extra_item.role, "issue", key, name=extra_item.name))
                         elif extra_item.role is ReviewRole.SERIES_EXTRA:
-                            series_extras.append(_group(extra, extra_item.role, "series", None, name=extra_item.name))
+                            series_extras.append(_group(extra, extra_item.role, "series", str(item.series_path), name=extra_item.name))
                     staged_issues[key] = staged
                 elif item.role is ReviewRole.SERIES_EXTRA:
                     # Preserve the issue container as one named extra group rather than flattening files.
@@ -176,7 +205,7 @@ def build_staged_import(
                     for extra in issue.extras:
                         media.extend(extra.media)
                     synthetic = ScannedGroup(item.name, issue.relative_path, issue.primary.suggested_role if issue.primary else SuggestedRole.EXTRA, media)
-                    series_extras.append(_group(synthetic, ReviewRole.SERIES_EXTRA, "series", None))
+                    series_extras.append(_group(synthetic, ReviewRole.SERIES_EXTRA, "series", str(item.series_path)))
 
         # Root-level groups, including groups manually reclassified as issues.
         for item in plan.items:
@@ -185,7 +214,7 @@ def build_staged_import(
             group = _find_group(plan, item.relative_path)
             key = str(item.relative_path)
             if item.role is ReviewRole.SERIES_EXTRA:
-                series_extras.append(_group(group, item.role, "series", None, name=item.name))
+                series_extras.append(_group(group, item.role, "series", str(item.series_path), name=item.name))
             elif item.role is ReviewRole.ISSUE:
                 meta = issue_metadata.get(key, {})
                 staged_issues[key] = StagedIssue(
@@ -194,6 +223,7 @@ def build_staged_import(
                     title=_optional_text(meta.get("title")),
                     complete=_optional_bool(meta.get("complete")),
                     sort_order=_optional_int(meta.get("sort_order")),
+                    series_key=str(item.series_path),
                     groups=[_group(group, ReviewRole.PRIMARY, "issue", key, name=item.name)],
                 )
 
@@ -204,7 +234,7 @@ def build_staged_import(
             if item.role is ReviewRole.SERIES_EXTRA:
                 group = _find_group(plan, item.relative_path)
                 if not any(extra.relative_path == str(group.relative_path) for extra in series_extras):
-                    series_extras.append(_group(group, item.role, "series", None, name=item.name))
+                    series_extras.append(_group(group, item.role, "series", str(item.series_path), name=item.name))
             elif item.role is ReviewRole.PRIMARY:
                 owner = str(item.issue_path)
                 if owner in staged_issues:
@@ -225,7 +255,7 @@ def build_staged_import(
             if item.role in {ReviewRole.PRIMARY, ReviewRole.ISSUE_EXTRA}:
                 staged.groups.append(_group(group, item.role, "issue", key, name=None if item.role is ReviewRole.PRIMARY else item.name))
             elif item.role is ReviewRole.SERIES_EXTRA:
-                series_extras.append(_group(group, item.role, "series", None, name=item.name))
+                series_extras.append(_group(group, item.role, "series", str(item.series_path), name=item.name))
         staged_issues[key] = staged
 
     return StagedImport(
@@ -239,6 +269,7 @@ def build_staged_import(
         series_complete=series_complete,
         import_kind="series" if plan.scan.is_series_candidate else "issue",
         issues=list(staged_issues.values()),
+        subseries=staged_subseries,
         series_extras=series_extras,
     )
 

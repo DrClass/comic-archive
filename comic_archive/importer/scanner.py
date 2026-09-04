@@ -12,6 +12,7 @@ from .models import (
     ScannedImport,
     ScannedIssue,
     ScannedMedia,
+    ScannedSeries,
     SuggestedRole,
 )
 from .sorting import natural_path_key
@@ -111,6 +112,7 @@ def _find_content_root(
     *,
     extra_overrides: set[Path] | None = None,
     primary_overrides: set[Path] | None = None,
+    structural_overrides: set[Path] | None = None,
 ) -> Path:
     """Collapse harmless single-directory wrappers around an import.
 
@@ -147,6 +149,8 @@ def _find_content_root(
         # total. If an extra-like sibling exists, the current directory carries
         # structure and must be retained for review.
         if len(all_media_children) != 1 or len(media_children) != 1:
+            return current
+        if structural_overrides and media_children[0].resolve() in structural_overrides:
             return current
 
         current = media_children[0]
@@ -379,6 +383,7 @@ def scan_folder(
     *,
     extra_folders: list[str | Path] | None = None,
     primary_folders: list[str | Path] | None = None,
+    subseries_folders: list[str | Path] | None = None,
     pdf_cache_root: str | Path | None = None,
 ) -> ScannedImport:
     source = Path(source).expanduser().resolve()
@@ -394,15 +399,17 @@ def scan_folder(
 
     extra_overrides = _normalize_hint_paths(source, extra_folders)
     primary_overrides = _normalize_hint_paths(source, primary_folders)
-    overlap = extra_overrides & primary_overrides
+    subseries_overrides = _normalize_hint_paths(source, subseries_folders)
+    overlap = (extra_overrides & primary_overrides) | (extra_overrides & subseries_overrides) | (primary_overrides & subseries_overrides)
     if overlap:
         paths = ", ".join(str(path) for path in sorted(overlap))
-        raise FolderScanError(f"Folder cannot be both primary and extra: {paths}")
+        raise FolderScanError(f"Folder has conflicting import roles: {paths}")
 
     content_root = _find_content_root(
         source,
         extra_overrides=extra_overrides,
         primary_overrides=primary_overrides,
+        structural_overrides=subseries_overrides,
     )
     direct_media_files = [
         child for child in content_root.iterdir()
@@ -414,39 +421,60 @@ def scan_folder(
         primary_overrides=primary_overrides,
     )
 
-    # A root with multiple issue-like children is a plausible series. A root
-    # with one issue-like child plus explicit extra-like siblings also carries
-    # series structure and must not be flattened into one issue.
+    # Explicit sub-series hints force a series-shaped scan even when there is
+    # only one child. Hints are source-relative and may be nested recursively.
+    content_subseries = {
+        path for path in subseries_overrides
+        if path == content_root.resolve() or content_root.resolve() in path.parents
+    }
     is_series = not direct_media_files and (
-        len(issue_dirs) >= 2 or (len(issue_dirs) >= 1 and bool(series_extra_dirs))
+        len(issue_dirs) >= 2 or (len(issue_dirs) >= 1 and bool(series_extra_dirs)) or bool(content_subseries)
     )
 
     primary: ScannedGroup | None = None
     extras: list[ScannedGroup] = []
     issues: list[ScannedIssue] = []
+    subseries: list[ScannedSeries] = []
 
-    if is_series:
-        for issue_dir in sorted(issue_dirs, key=lambda p: natural_path_key(p.relative_to(content_root))):
+    def scan_series_level(container: Path, series_path: Path) -> None:
+        children = [
+            child for child in container.iterdir()
+            if child.is_dir() and _contains_supported_media(child)
+        ]
+        for child in sorted(children, key=lambda p: natural_path_key(p.relative_to(container))):
+            child_rel_source = child.resolve()
+            child_rel_content = child.relative_to(content_root)
+            if _looks_like_extra(child, extra_overrides=extra_overrides, primary_overrides=primary_overrides):
+                for group in _scan_extra_groups(child, content_root, pdf_cache_root):
+                    group.series_path = series_path
+                    extras.append(group)
+                continue
+            if child_rel_source in subseries_overrides:
+                subseries.append(ScannedSeries(name=child.name, relative_path=child_rel_content, parent_path=series_path))
+                scan_series_level(child, child_rel_content)
+                continue
             issue_primary, issue_extras = _scan_single_issue(
-                issue_dir,
+                child,
                 content_root,
                 extra_overrides=extra_overrides,
                 primary_overrides=primary_overrides,
                 separate_child_folders=True,
                 pdf_cache_root=pdf_cache_root,
             )
-            issues.append(
-                ScannedIssue(
-                    name=issue_dir.name,
-                    relative_path=issue_dir.relative_to(content_root),
-                    primary=issue_primary,
-                    extras=issue_extras,
-                )
-            )
+            if issue_primary is not None:
+                issue_primary.series_path = series_path
+            for group in issue_extras:
+                group.series_path = series_path
+            issues.append(ScannedIssue(
+                name=child.name,
+                relative_path=child_rel_content,
+                primary=issue_primary,
+                extras=issue_extras,
+                series_path=series_path,
+            ))
 
-        extras = []
-        for child in sorted(series_extra_dirs, key=lambda p: natural_path_key(p.relative_to(content_root))):
-            extras.extend(_scan_extra_groups(child, content_root, pdf_cache_root))
+    if is_series:
+        scan_series_level(content_root, Path('.'))
     else:
         primary, extras = _scan_single_issue(
             content_root,
@@ -455,7 +483,6 @@ def scan_folder(
             primary_overrides=primary_overrides,
             pdf_cache_root=pdf_cache_root,
         )
-
     ignored_files = sorted(
         (
             path.relative_to(content_root)
@@ -471,5 +498,6 @@ def scan_folder(
         primary=primary,
         extras=extras,
         issues=issues,
+        subseries=subseries,
         ignored_files=ignored_files,
     )

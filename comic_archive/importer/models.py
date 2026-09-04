@@ -31,6 +31,16 @@ class ScannedGroup:
     relative_path: Path
     suggested_role: SuggestedRole
     media: list[ScannedMedia] = field(default_factory=list)
+    series_path: Path = Path(".")
+
+
+@dataclass(slots=True)
+class ScannedSeries:
+    """A nested series container discovered beneath the import root."""
+
+    name: str
+    relative_path: Path
+    parent_path: Path = Path(".")
 
 
 @dataclass(slots=True)
@@ -41,6 +51,7 @@ class ScannedIssue:
     relative_path: Path
     primary: ScannedGroup | None
     extras: list[ScannedGroup] = field(default_factory=list)
+    series_path: Path = Path(".")
 
     @property
     def media_count(self) -> int:
@@ -55,6 +66,7 @@ class ScannedImport:
     primary: ScannedGroup | None
     extras: list[ScannedGroup]
     issues: list[ScannedIssue] = field(default_factory=list)
+    subseries: list[ScannedSeries] = field(default_factory=list)
     ignored_files: list[Path] = field(default_factory=list)
 
     @property

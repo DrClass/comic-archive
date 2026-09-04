@@ -45,17 +45,21 @@ class SeriesView:
     title: str
     complete: bool | None = None
     updated_at: str | None = None
+    parent_series_id: str | None = None
+    sort_order: int | None = None
+    children: list["SeriesView"] = field(default_factory=list)
     issues: list[IssueView] = field(default_factory=list)
     extras: list[GroupView] = field(default_factory=list)
 
     @property
     def total_pages(self) -> int:
-        return sum(
+        direct = sum(
             len(group.media)
             for issue in self.issues
             for group in issue.groups
             if group.role == "primary"
         )
+        return direct + sum(child.total_pages for child in self.children)
 
     @property
     def total_extras(self) -> int:
@@ -66,7 +70,16 @@ class SeriesView:
             if group.role != "primary"
         )
         series_extras = sum(len(group.media) for group in self.extras)
-        return issue_extras + series_extras
+        return issue_extras + series_extras + sum(child.total_extras for child in self.children)
+
+    @property
+    def total_issues(self) -> int:
+        return len(self.issues) + sum(child.total_issues for child in self.children)
+
+    @property
+    def effective_updated_at(self) -> str | None:
+        values = [value for value in [self.updated_at, *(child.effective_updated_at for child in self.children)] if value]
+        return max(values) if values else None
 
 
 @dataclass(slots=True)
@@ -74,6 +87,12 @@ class AuthorView:
     id: str
     name: str
     series: list[SeriesView] = field(default_factory=list)
+
+    @property
+    def total_series(self) -> int:
+        def count(items: list[SeriesView]) -> int:
+            return sum(1 + count(item.children) for item in items)
+        return count(self.series)
 
 
 def _bool_or_none(value: int | None) -> bool | None:
@@ -87,11 +106,19 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
         authors: list[AuthorView] = []
         for author_row in db.execute("SELECT id, name FROM authors ORDER BY name COLLATE NOCASE"):
             author = AuthorView(id=author_row["id"], name=author_row["name"])
+            by_id: dict[str, SeriesView] = {}
+            ordered: list[SeriesView] = []
             for series_row in db.execute(
-                "SELECT id, title, complete, updated_at FROM series WHERE author_id = ? ORDER BY title COLLATE NOCASE",
+                """SELECT id, title, complete, updated_at, parent_series_id, sort_order
+                   FROM series WHERE author_id = ?
+                   ORDER BY COALESCE(sort_order, 2147483647), title COLLATE NOCASE""",
                 (author.id,),
             ):
-                series = SeriesView(id=series_row["id"], title=series_row["title"], complete=_bool_or_none(series_row["complete"]), updated_at=series_row["updated_at"])
+                series = SeriesView(
+                    id=series_row["id"], title=series_row["title"],
+                    complete=_bool_or_none(series_row["complete"]), updated_at=series_row["updated_at"],
+                    parent_series_id=series_row["parent_series_id"], sort_order=series_row["sort_order"],
+                )
                 for issue_row in db.execute(
                     """SELECT id, issue_number, title, complete, sort_order, updated_at
                        FROM issues WHERE series_id = ?
@@ -99,17 +126,21 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
                     (series.id,),
                 ):
                     issue = IssueView(
-                        id=issue_row["id"],
-                        issue_number=issue_row["issue_number"],
-                        title=issue_row["title"],
-                        complete=_bool_or_none(issue_row["complete"]),
-                        sort_order=issue_row["sort_order"],
+                        id=issue_row["id"], issue_number=issue_row["issue_number"], title=issue_row["title"],
+                        complete=_bool_or_none(issue_row["complete"]), sort_order=issue_row["sort_order"],
                         updated_at=issue_row["updated_at"],
                     )
                     issue.groups = _read_groups(db, series.id, issue.id)
                     series.issues.append(issue)
                 series.extras = _read_groups(db, series.id, None)
-                author.series.append(series)
+                by_id[series.id] = series
+                ordered.append(series)
+            for series in ordered:
+                parent = by_id.get(series.parent_series_id) if series.parent_series_id else None
+                if parent is None:
+                    author.series.append(series)
+                else:
+                    parent.children.append(series)
             authors.append(author)
         return authors
 

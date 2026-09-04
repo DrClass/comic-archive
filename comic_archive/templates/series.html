@@ -1,14 +1,35 @@
 {% extends "base.html" %}
 {% block title %}{{ series.title }} — Comic Archive{% endblock %}
 {% block content %}
-<div class="breadcrumbs"><a href="/">Authors</a> / <a href="/authors/{{ author.id }}">{{ author.name }}</a> / {{ series.title }}</div>
+<div class="breadcrumbs"><a href="/">Authors</a> / <a href="/authors/{{ author.id }}">{{ author.name }}</a>{% for parent in lineage %} / <a href="/series/{{ parent.id }}">{{ parent.title }}</a>{% endfor %} / {{ series.title }}</div>
 <div class="page-heading">
   <div>
     <h1>{{ series.title }}</h1>
-    <p class="muted">by {{ author.name }} · {% if series.complete is sameas true %}Series complete{% elif series.complete is sameas false %}Series incomplete{% else %}Series completeness unknown{% endif %}{% if series.updated_at %} · Modified {{ series.updated_at[:10] }}{% endif %}</p>
+    <p class="muted">by {{ author.name }} · {% if series.complete is sameas true %}Series complete{% elif series.complete is sameas false %}Series incomplete{% else %}Series completeness unknown{% endif %}{% if series.effective_updated_at %} · Modified {{ series.effective_updated_at[:10] }}{% endif %}</p>
   </div>
   {% if request.state.user.is_admin %}<a class="admin-link" href="/series/{{ series.id }}/edit">Edit series</a>{% endif %}
 </div>
+
+{% if series.children %}
+<h2>Sub-series</h2>
+<div class="card-grid">
+{% for child in series.children %}
+  <a class="media-card" href="/series/{{ child.id }}">
+    <div class="media-card-image">
+      {% set preview = series_previews.get(child.id) %}
+      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
+    </div>
+    <div class="media-card-body">
+      <h3>{{ child.title }}</h3>
+      <p class="muted">{{ child.total_issues }} issue{% if child.total_issues != 1 %}s{% endif %}<br>
+      {% if child.complete is sameas true %}Complete{% elif child.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}<br>
+      Modified {{ child.effective_updated_at[:10] if child.effective_updated_at else "Unknown" }}<br>
+      {{ child.total_pages }} page{% if child.total_pages != 1 %}s{% endif %} + {{ child.total_extras }} extra{% if child.total_extras != 1 %}s{% endif %}</p>
+    </div>
+  </a>
+{% endfor %}
+</div>
+{% endif %}
 
 {% if series.extras %}
 <details class="extras-panel">

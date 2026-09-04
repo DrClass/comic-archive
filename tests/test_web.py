@@ -2171,3 +2171,74 @@ def test_organizer_group_actions_preserve_moves_and_block_empty_groups(tmp_path:
     )
     assert response.status_code == 303
     assert all(group.name != "Textless" for group in client.app.state.import_sessions[session_id].staged.issues[0].groups)
+
+
+def test_import_review_can_promote_issue_folder_to_subseries_before_staging(tmp_path: Path):
+    source = tmp_path / "incoming" / "Nested Comic"
+    for path in (
+        "Arc One/Chapter 1/001.jpg",
+        "Arc One/Chapter 2/001.jpg",
+        "Arc Two/Part A/001.jpg",
+    ):
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.encode())
+
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    review_url = response.headers["location"]
+    session_id = review_url.split("/")[2]
+
+    review = client.get(review_url)
+    assert 'value="Arc One">Make sub-series' in review.text
+
+    promoted = _post(
+        client,
+        f"/import/{session_id}/review/mark-subseries",
+        data={"folder_path": "Arc One"},
+        follow_redirects=False,
+    )
+    assert promoted.status_code == 303
+
+    review = client.get(review_url)
+    assert "sub-series" in review.text
+    assert "Arc One/Chapter 1" in review.text
+    assert "Arc One/Chapter 2" in review.text
+
+
+def test_nested_series_browsing_and_parent_edit_controls(tmp_path: Path):
+    source = tmp_path / "nested-ui"
+    for path in ("Arc One/Chapter 1/001.jpg", "Arc Two/Chapter 2/001.jpg"):
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.encode())
+    staged = build_staged_import(
+        build_review_plan(scan_folder(source, subseries_folders=["Arc One", "Arc Two"])),
+        author="Nested Artist",
+        series="Parent Comic",
+    )
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    result = commit_staged_import(staged, library_root=library, database_path=database)
+    client = _admin_client(database, library)
+
+    author_page = client.get(f"/authors/{result.author_id}")
+    assert "Parent Comic" in author_page.text
+    assert "2 issues" in author_page.text
+
+    root_page = client.get(f"/series/{result.series_id}")
+    assert "Sub-series" in root_page.text
+    assert "Arc One" in root_page.text and "Arc Two" in root_page.text
+
+    root = read_library(database)[0].series[0]
+    child = root.children[0]
+    child_page = client.get(f"/series/{child.id}")
+    assert f'href="/series/{result.series_id}">Parent Comic</a>' in child_page.text
+
+    edit_page = client.get(f"/series/{child.id}/edit")
+    assert 'name="parent_series_id"' in edit_page.text
+    assert f'value="{result.series_id}" selected' in edit_page.text

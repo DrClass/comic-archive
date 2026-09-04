@@ -11,6 +11,7 @@
   {% for choice in authors %}<option value="{{ choice.id }}" {% if choice.id == author.id %}selected{% endif %}>{{ choice.name }}</option>{% endfor %}
   </select></div>
   <div class="form-row"><label for="complete">Completeness</label><select id="complete" name="complete"><option value="" {% if series.complete is none %}selected{% endif %}>Unknown</option><option value="yes" {% if series.complete is sameas true %}selected{% endif %}>Complete</option><option value="no" {% if series.complete is sameas false %}selected{% endif %}>Incomplete</option></select></div>
+  <div class="form-row"><label for="parent_series_id">Parent series</label><select id="parent_series_id" name="parent_series_id"><option value="" {% if not series.parent_series_id %}selected{% endif %}>None (top level)</option>{% for choice in parent_choices %}<option value="{{ choice.id }}" {% if choice.id == series.parent_series_id %}selected{% endif %}>{{ choice.title }}</option>{% endfor %}</select></div>
   {% if series.issues %}
   <h2>Issue order</h2>
   <p class="muted">Lower numbers appear first. You can use any whole numbers; they will be normalized when saved.</p>

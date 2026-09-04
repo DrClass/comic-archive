@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from .staging import SCHEMA_VERSION, StagedGroup, StagedImport, StagedIssue, StagedMedia
+from .staging import SCHEMA_VERSION, StagedGroup, StagedImport, StagedIssue, StagedMedia, StagedSeries
 
 
 class CommitError(RuntimeError):
@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS series (
     author_id TEXT NOT NULL REFERENCES authors(id) ON DELETE CASCADE,
     title TEXT NOT NULL COLLATE NOCASE,
     complete INTEGER,
+    parent_series_id TEXT REFERENCES series(id) ON DELETE SET NULL,
+    sort_order INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(author_id, title)
@@ -148,6 +150,15 @@ def _ensure_schema_columns(db: sqlite3.Connection) -> None:
     series_columns = {row[1] for row in db.execute("PRAGMA table_info(series)")}
     if "complete" not in series_columns:
         db.execute("ALTER TABLE series ADD COLUMN complete INTEGER")
+    if "parent_series_id" not in series_columns:
+        db.execute("ALTER TABLE series ADD COLUMN parent_series_id TEXT REFERENCES series(id) ON DELETE SET NULL")
+    if "sort_order" not in series_columns:
+        db.execute("ALTER TABLE series ADD COLUMN sort_order INTEGER")
+        rows = db.execute("SELECT id, author_id FROM series ORDER BY author_id, title COLLATE NOCASE").fetchall()
+        counters: dict[str, int] = {}
+        for series_id, author_id in rows:
+            counters[author_id] = counters.get(author_id, 0) + 1
+            db.execute("UPDATE series SET sort_order = ? WHERE id = ?", (counters[author_id], series_id))
     if "created_at" not in series_columns:
         db.execute("ALTER TABLE series ADD COLUMN created_at TEXT")
     if "updated_at" not in series_columns:
@@ -188,7 +199,7 @@ def _ensure_schema_columns(db: sqlite3.Connection) -> None:
     )""")
     db.executescript("""
     CREATE TRIGGER IF NOT EXISTS touch_series_after_series_update
-    AFTER UPDATE OF title, author_id ON series
+    AFTER UPDATE OF title, author_id, complete, parent_series_id, sort_order ON series
     BEGIN
       UPDATE series SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
     END;
@@ -379,6 +390,9 @@ def load_staged_import(path: str | Path) -> StagedImport:
         payload["groups"] = [group(x) for x in payload.get("groups", [])]
         return StagedIssue(**payload)
 
+    def nested_series(item: dict) -> StagedSeries:
+        return StagedSeries(**item)
+
     try:
         return StagedImport(
             schema_version=data["schema_version"],
@@ -391,6 +405,7 @@ def load_staged_import(path: str | Path) -> StagedImport:
             series_complete=data.get("series_complete"),
             import_kind=data["import_kind"],
             issues=[issue(x) for x in data.get("issues", [])],
+            subseries=[nested_series(x) for x in data.get("subseries", [])],
             series_extras=[group(x) for x in data.get("series_extras", [])],
         )
     except (KeyError, TypeError) as exc:
@@ -443,21 +458,31 @@ def _find_or_create_author(db: sqlite3.Connection, name: str) -> str:
 
 
 def _find_or_create_series(
-    db: sqlite3.Connection, author_id: str, title: str, complete: bool | None = None
+    db: sqlite3.Connection, author_id: str, title: str, complete: bool | None = None,
+    *, parent_series_id: str | None = None, sort_order: int | None = None,
 ) -> str:
     row = db.execute(
-        "SELECT id, complete FROM series WHERE author_id = ? AND title = ? COLLATE NOCASE",
+        "SELECT id, complete, parent_series_id, sort_order FROM series WHERE author_id = ? AND title = ? COLLATE NOCASE",
         (author_id, title),
     ).fetchone()
     complete_value = None if complete is None else int(complete)
     if row:
+        updates = []
+        params: list[object] = []
         if complete is not None and row[1] != complete_value:
-            db.execute("UPDATE series SET complete = ? WHERE id = ?", (complete_value, row[0]))
+            updates.append("complete = ?"); params.append(complete_value)
+        if row[2] != parent_series_id:
+            updates.append("parent_series_id = ?"); params.append(parent_series_id)
+        if sort_order is not None and row[3] != sort_order:
+            updates.append("sort_order = ?"); params.append(sort_order)
+        if updates:
+            params.append(row[0])
+            db.execute(f"UPDATE series SET {', '.join(updates)} WHERE id = ?", params)
         return row[0]
     series_id = str(uuid4())
     db.execute(
-        "INSERT INTO series(id, author_id, title, complete) VALUES (?, ?, ?, ?)",
-        (series_id, author_id, title, complete_value),
+        "INSERT INTO series(id, author_id, title, complete, parent_series_id, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+        (series_id, author_id, title, complete_value, parent_series_id, sort_order),
     )
     return series_id
 
@@ -569,12 +594,30 @@ def commit_staged_import(
                 )
 
             author_id = _find_or_create_author(db, staged.author)
-            series_id = _find_or_create_series(db, author_id, staged.series, staged.series_complete)
+            series_id = _find_or_create_series(db, author_id, staged.series, staged.series_complete, parent_series_id=None)
+            series_ids_by_key: dict[str, str] = {".": series_id}
+            pending = list(staged.subseries)
+            while pending:
+                progressed = False
+                for nested in list(pending):
+                    if nested.parent_key not in series_ids_by_key:
+                        continue
+                    parent_id = series_ids_by_key[nested.parent_key]
+                    nested_id = _find_or_create_series(
+                        db, author_id, nested.title, nested.complete,
+                        parent_series_id=parent_id, sort_order=nested.sort_order,
+                    )
+                    series_ids_by_key[nested.source_key] = nested_id
+                    pending.remove(nested)
+                    progressed = True
+                if not progressed:
+                    raise CommitError("Nested series hierarchy contains an unresolved parent")
 
-            existing_max_order = db.execute(
-                "SELECT COALESCE(MAX(sort_order), 0) FROM issues WHERE series_id = ?",
-                (series_id,),
-            ).fetchone()[0]
+            existing_orders = {
+                key: db.execute("SELECT COALESCE(MAX(sort_order), 0) FROM issues WHERE series_id = ?", (sid,)).fetchone()[0]
+                for key, sid in series_ids_by_key.items()
+            }
+            imported_counts: dict[str, int] = {key: 0 for key in series_ids_by_key}
             ordered_staged_issues = sorted(
                 enumerate(staged.issues),
                 key=lambda pair: (
@@ -584,6 +627,10 @@ def commit_staged_import(
             )
             for import_position, (_, issue) in enumerate(ordered_staged_issues, start=1):
                 issue_id = str(uuid4())
+                target_series_id = series_ids_by_key.get(issue.series_key)
+                if target_series_id is None:
+                    raise CommitError(f"Issue references unknown nested series: {issue.series_key}")
+                imported_counts[issue.series_key] = imported_counts.get(issue.series_key, 0) + 1
                 complete_value = None if issue.complete is None else int(issue.complete)
                 fingerprint, issue_hashes = computed_hashes[issue.source_key]
                 db.execute(
@@ -592,12 +639,12 @@ def commit_staged_import(
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         issue_id,
-                        series_id,
+                        target_series_id,
                         issue.source_key,
                         issue.issue_number,
                         issue.title,
                         complete_value,
-                        existing_max_order + import_position,
+                        existing_orders.get(issue.series_key, 0) + imported_counts[issue.series_key],
                         fingerprint,
                     ),
                 )
@@ -606,7 +653,7 @@ def commit_staged_import(
                     count, size = _copy_group(
                         db,
                         group=group,
-                        series_id=series_id,
+                        series_id=target_series_id,
                         issue_id=issue_id,
                         library_root=library,
                         sort_order=index,
@@ -616,14 +663,20 @@ def commit_staged_import(
                     copied_files += count
                     copied_bytes += size
 
+            extra_orders: dict[str, int] = {}
             for index, group in enumerate(staged.series_extras, start=1):
+                owner_key = group.owner_key or "."
+                target_series_id = series_ids_by_key.get(owner_key)
+                if target_series_id is None:
+                    raise CommitError(f"Extra group references unknown nested series: {owner_key}")
+                extra_orders[owner_key] = extra_orders.get(owner_key, 0) + 1
                 count, size = _copy_group(
                     db,
                     group=group,
-                    series_id=series_id,
+                    series_id=target_series_id,
                     issue_id=None,
                     library_root=library,
-                    sort_order=index,
+                    sort_order=extra_orders[owner_key],
                     created_paths=created_paths,
                 )
                 copied_files += count

@@ -5,7 +5,7 @@
 <div class="page-heading">
   <div>
     <h1>{{ author.name }}</h1>
-    <p class="muted">{{ author.series|length }} series</p>
+    <p class="muted">{{ author.total_series }} series</p>
   </div>
   {% if request.state.user.is_admin %}<a class="admin-link" href="/authors/{{ author.id }}/edit">Edit author</a>{% endif %}
 </div>
@@ -24,9 +24,9 @@
     <div class="media-card-body">
       <h2>{{ series.title }}</h2>
       <p class="muted series-summary">
-        <span>{{ series.issues|length }} issue{% if series.issues|length != 1 %}s{% endif %}</span><br>
+        <span>{{ series.total_issues }} issue{% if series.total_issues != 1 %}s{% endif %}</span><br>
         <span>{% if series.complete is sameas true %}Complete{% elif series.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}</span><br>
-        <span>Modified {{ series.updated_at[:10] if series.updated_at else "Unknown" }}</span><br>
+        <span>Modified {{ series.effective_updated_at[:10] if series.effective_updated_at else "Unknown" }}</span><br>
         <span>{{ series.total_pages }} page{% if series.total_pages != 1 %}s{% endif %} + {{ series.total_extras }} extra{% if series.total_extras != 1 %}s{% endif %}</span>
       </p>
     </div>

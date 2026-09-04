@@ -506,3 +506,39 @@ PDF files are accepted as importer input. Each PDF page is rendered at 150 DPI t
 The web import review now exposes media-bearing folders that are currently included in primary content but were not recognized as extras. Admins can click **Mark folder as extras** before staging. The importer rescans the untouched source with an explicit extra-folder override, preserving that folder as a real extra group instead of requiring page-by-page regrouping later.
 
 This works for one-shot comics and for folders nested inside detected series issues, including structures such as `Issue A/Pages/...` plus `Issue A/Gallery/...` where `Gallery` is bonus material but has no recognized extra keyword.
+
+## Milestone 27 — nested series and hierarchy-aware import review
+
+Series can now contain child series recursively. The `series` table gains nullable
+`parent_series_id` and `sort_order` columns; existing databases migrate automatically
+and existing flat series remain top-level.
+
+During import review, an issue-like folder can be promoted to **Make sub-series**
+before staging. The source is rescanned without modifying it, and that folder's child
+folders become reviewable issues or can themselves be promoted again for deeper
+nesting. Folders shown in the pre-flatten section can also be marked as a sub-series.
+Nested series names are editable during review, and the metadata screen supports
+nested-series completeness and ordering.
+
+Example:
+
+```text
+Comic/
+  Volume 1/
+    Arc A/
+      Chapter 1/
+      Chapter 2/
+    Arc B/
+      Chapter 3/
+```
+
+`Volume 1`, `Arc A`, and `Arc B` can all be marked as sub-series, producing a recursive
+series tree. Issues and series-level extras are committed to the series node that owns
+them. Managed media storage remains unchanged: media still lives under the ID of the
+series/content group that owns it.
+
+The author page displays top-level series cards with recursively aggregated issue,
+page, and extra totals. Parent modified dates also reflect descendant changes. Series
+pages show child-series cards before direct issues and breadcrumbs reflect the nested
+path. Existing series can be moved under another series or returned to top level from
+**Edit series**; cycle creation is rejected.

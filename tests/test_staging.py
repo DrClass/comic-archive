@@ -3,7 +3,7 @@ from pathlib import Path
 
 from comic_archive.importer.review import ReviewRole, build_review_plan
 from comic_archive.importer.scanner import scan_folder
-from comic_archive.importer.staging import build_staged_import
+from comic_archive.importer.staging import SCHEMA_VERSION, build_staged_import
 
 
 def touch(path: Path, data: bytes = b"x") -> None:
@@ -76,7 +76,7 @@ def test_staged_import_serializes_to_json(tmp_path: Path) -> None:
     staged.save(destination)
     payload = json.loads(destination.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["author"] == "A"
     assert payload["series"] == "S"
     assert payload["issues"][0]["groups"][0]["media"][0]["relative_path"] == "001.jpg"

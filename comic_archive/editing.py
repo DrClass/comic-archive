@@ -100,12 +100,13 @@ def edit_series(
     title: str | object = _UNSET,
     author_id: str | object = _UNSET,
     complete: bool | None | object = _UNSET,
+    parent_series_id: str | None | object = _UNSET,
 ) -> None:
     with _connect(database_path) as db:
-        row = db.execute("SELECT id, author_id, title, complete FROM series WHERE id = ?", (series_id,)).fetchone()
+        row = db.execute("SELECT id, author_id, title, complete, parent_series_id FROM series WHERE id = ?", (series_id,)).fetchone()
         if not row:
             raise EditError(f"Series not found: {series_id}")
-        before = _row_dict(row, ("author_id", "title", "complete"))
+        before = _row_dict(row, ("author_id", "title", "complete", "parent_series_id"))
         new_title = row["title"] if title is _UNSET else str(title).strip()
         new_author = row["author_id"] if author_id is _UNSET else str(author_id)
         if not new_title:
@@ -113,11 +114,41 @@ def edit_series(
         if not db.execute("SELECT 1 FROM authors WHERE id = ?", (new_author,)).fetchone():
             raise EditError(f"Author not found: {new_author}")
         new_complete = row["complete"] if complete is _UNSET else (None if complete is None else int(complete))
-        after = {"author_id": new_author, "title": new_title, "complete": new_complete}
+        new_parent = row["parent_series_id"] if parent_series_id is _UNSET else parent_series_id
+        if new_parent == "":
+            new_parent = None
+        if new_parent is not None:
+            parent = db.execute("SELECT id, author_id, parent_series_id FROM series WHERE id = ?", (new_parent,)).fetchone()
+            if not parent:
+                raise EditError(f"Parent series not found: {new_parent}")
+            if parent["author_id"] != new_author:
+                raise EditError("Parent series must belong to the same author")
+            if new_parent == series_id:
+                raise EditError("A series cannot be its own parent")
+            cursor = parent
+            seen = {series_id}
+            while cursor is not None:
+                if cursor["id"] in seen:
+                    raise EditError("Series nesting cannot contain a cycle")
+                seen.add(cursor["id"])
+                pid = cursor["parent_series_id"]
+                cursor = db.execute("SELECT id, author_id, parent_series_id FROM series WHERE id = ?", (pid,)).fetchone() if pid else None
+        after = {"author_id": new_author, "title": new_title, "complete": new_complete, "parent_series_id": new_parent}
         if before == after:
             return
         try:
-            db.execute("UPDATE series SET author_id = ?, title = ?, complete = ? WHERE id = ?", (new_author, new_title, new_complete, series_id))
+            if new_author != row["author_id"]:
+                descendants = db.execute(
+                    """WITH RECURSIVE tree(id) AS (
+                           SELECT id FROM series WHERE parent_series_id = ?
+                           UNION ALL
+                           SELECT s.id FROM series s JOIN tree t ON s.parent_series_id = t.id
+                       ) SELECT id FROM tree""",
+                    (series_id,),
+                ).fetchall()
+                for descendant in descendants:
+                    db.execute("UPDATE series SET author_id = ? WHERE id = ?", (new_author, descendant["id"]))
+            db.execute("UPDATE series SET author_id = ?, title = ?, complete = ?, parent_series_id = ? WHERE id = ?", (new_author, new_title, new_complete, new_parent, series_id))
         except sqlite3.IntegrityError as exc:
             raise EditError("That author already has a series with this title") from exc
         _audit(db, entity_type="series", entity_id=series_id, action="edit", before=before, after=after)

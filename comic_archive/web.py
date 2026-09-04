@@ -61,6 +61,7 @@ class ImportSession:
     pdf_cache_root: Path | None = None
     last_activity: float = field(default_factory=time.time)
     extra_folder_overrides: set[str] = field(default_factory=set)
+    subseries_folder_overrides: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -80,9 +81,15 @@ def _find_author(authors: Iterable[AuthorView], author_id: str) -> AuthorView | 
     return next((author for author in authors if author.id == author_id), None)
 
 
+def _walk_series(series_items: Iterable[SeriesView]):
+    for series in series_items:
+        yield series
+        yield from _walk_series(series.children)
+
+
 def _find_series(authors: Iterable[AuthorView], series_id: str) -> tuple[AuthorView, SeriesView] | None:
     for author in authors:
-        for series in author.series:
+        for series in _walk_series(author.series):
             if series.id == series_id:
                 return author, series
     return None
@@ -90,7 +97,7 @@ def _find_series(authors: Iterable[AuthorView], series_id: str) -> tuple[AuthorV
 
 def _find_issue(authors: Iterable[AuthorView], issue_id: str) -> tuple[AuthorView, SeriesView, IssueView] | None:
     for author in authors:
-        for series in author.series:
+        for series in _walk_series(author.series):
             for issue in series.issues:
                 if issue.id == issue_id:
                     return author, series, issue
@@ -99,7 +106,7 @@ def _find_issue(authors: Iterable[AuthorView], issue_id: str) -> tuple[AuthorVie
 
 def _find_group(authors: Iterable[AuthorView], group_id: str) -> tuple[AuthorView, SeriesView, IssueView | None, GroupView] | None:
     for author in authors:
-        for series in author.series:
+        for series in _walk_series(author.series):
             for group in series.extras:
                 if group.id == group_id:
                     return author, series, None, group
@@ -132,13 +139,36 @@ def _issue_preview_map(series: SeriesView) -> dict[str, MediaView]:
 
 def _series_preview_map(author: AuthorView) -> dict[str, MediaView]:
     previews: dict[str, MediaView] = {}
-    for series in author.series:
+
+    def first_preview(series: SeriesView) -> MediaView | None:
         for issue in series.issues:
             media = _first_image_media(issue)
             if media is not None:
-                previews[series.id] = media
-                break
+                return media
+        for child in series.children:
+            media = first_preview(child)
+            if media is not None:
+                return media
+        return None
+
+    for series in _walk_series(author.series):
+        media = first_preview(series)
+        if media is not None:
+            previews[series.id] = media
     return previews
+
+
+def _series_lineage(author: AuthorView, series: SeriesView) -> list[SeriesView]:
+    by_id = {item.id: item for item in _walk_series(author.series)}
+    lineage: list[SeriesView] = []
+    current = series
+    seen: set[str] = set()
+    while current.parent_series_id and current.parent_series_id in by_id and current.id not in seen:
+        seen.add(current.id)
+        current = by_id[current.parent_series_id]
+        lineage.append(current)
+    lineage.reverse()
+    return lineage
 
 
 def _media_record(database: Path, media_id: str) -> tuple[str, str] | None:
@@ -332,6 +362,8 @@ def _new_pdf_cache(staging_root: Path, upload_root: Path | None = None) -> Path:
     return root
 
 def _review_role_choices(item, *, is_series: bool) -> list[ReviewRole]:
+    if item.source_kind == "subseries":
+        return [ReviewRole.SUBSERIES]
     if item.source_kind == "issue":
         return [ReviewRole.ISSUE, ReviewRole.SERIES_EXTRA]
     if is_series and item.issue_path is None:
@@ -339,6 +371,11 @@ def _review_role_choices(item, *, is_series: bool) -> list[ReviewRole]:
     if is_series:
         return [ReviewRole.ISSUE_EXTRA, ReviewRole.PRIMARY, ReviewRole.SERIES_EXTRA]
     return [ReviewRole.ISSUE_EXTRA, ReviewRole.PRIMARY, ReviewRole.SERIES_EXTRA]
+
+
+def _review_source_relative(scan, relative_path: Path) -> str:
+    prefix = scan.content_root.relative_to(scan.source)
+    return str(prefix / relative_path) if prefix != Path('.') else str(relative_path)
 
 
 
@@ -1256,6 +1293,11 @@ def create_app(
                     item for item in flattened_folder_candidates(session.plan.scan)
                     if str(item.relative_path) not in session.extra_folder_overrides
                 ],
+                "subseries_candidates": {
+                    index: _review_source_relative(session.plan.scan, item.relative_path)
+                    for index, item in enumerate(session.plan.items)
+                    if item.source_kind == "issue"
+                },
             },
         )
 
@@ -1273,11 +1315,41 @@ def create_app(
             scan = scan_folder(
                 session.plan.scan.source,
                 extra_folders=sorted(session.extra_folder_overrides),
+                subseries_folders=sorted(session.subseries_folder_overrides),
                 pdf_cache_root=session.pdf_cache_root,
             )
             session.plan = build_review_plan(scan)
         except (FolderScanError, OSError) as exc:
             session.extra_folder_overrides.discard(relative_path)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
+
+    @app.post("/import/{session_id}/review/mark-subseries", response_class=HTMLResponse)
+    async def import_review_mark_subseries(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        relative_path = form.get("folder_path", "").strip()
+        if not relative_path:
+            raise HTTPException(status_code=400, detail="Missing folder path")
+        candidate = (session.plan.scan.source / relative_path).resolve()
+        try:
+            candidate.relative_to(session.plan.scan.source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid folder path") from exc
+        if not candidate.is_dir():
+            raise HTTPException(status_code=400, detail="Sub-series folder not found")
+        session.subseries_folder_overrides.add(relative_path)
+        try:
+            scan = scan_folder(
+                session.plan.scan.source,
+                extra_folders=sorted(session.extra_folder_overrides),
+                subseries_folders=sorted(session.subseries_folder_overrides),
+                pdf_cache_root=session.pdf_cache_root,
+            )
+            session.plan = build_review_plan(scan)
+        except (FolderScanError, OSError) as exc:
+            session.subseries_folder_overrides.discard(relative_path)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(f"/import/{session_id}/review", status_code=303)
 
@@ -1308,6 +1380,11 @@ def create_app(
                         item for item in flattened_folder_candidates(session.plan.scan)
                         if str(item.relative_path) not in session.extra_folder_overrides
                     ],
+                    "subseries_candidates": {
+                        index: _review_source_relative(session.plan.scan, item.relative_path)
+                        for index, item in enumerate(session.plan.items)
+                        if item.source_kind == "issue"
+                    },
                 },
                 status_code=400,
             )
@@ -1319,8 +1396,10 @@ def create_app(
         _touch_import_activity(app, session)
         if session.plan.scan.is_series_candidate:
             issue_items = [item for item in session.plan.items if item.role is ReviewRole.ISSUE]
+            subseries_items = [item for item in session.plan.items if item.role is ReviewRole.SUBSERIES]
         else:
             issue_items = [None]
+            subseries_items = []
         return templates.TemplateResponse(
             request=request,
             name="import_metadata.html",
@@ -1328,6 +1407,7 @@ def create_app(
                 "session_id": session_id,
                 "plan": session.plan,
                 "issue_items": issue_items,
+                "subseries_items": subseries_items,
                 "series_default": session.series_default or session.plan.scan.content_root.name,
                 "author_value": session.author_default or "",
                 "series_value": session.series_default or "",
@@ -1344,8 +1424,15 @@ def create_app(
         author = form.get("author", "").strip()
         series = form.get("series", "").strip()
         issue_metadata: dict[str, dict[str, object]] = {}
+        subseries_metadata: dict[str, dict[str, object]] = {}
         if session.plan.scan.is_series_candidate:
             issue_items = [item for item in session.plan.items if item.role is ReviewRole.ISSUE]
+            subseries_items = [item for item in session.plan.items if item.role is ReviewRole.SUBSERIES]
+            for index, item in enumerate(subseries_items):
+                subseries_metadata[str(item.relative_path)] = {
+                    "complete": form.get(f"subseries_complete_{index}", ""),
+                    "sort_order": form.get(f"subseries_order_{index}", str(index + 1)),
+                }
             for index, item in enumerate(issue_items):
                 complete = form.get(f"complete_{index}", "")
                 issue_metadata[str(item.relative_path)] = {
@@ -1356,6 +1443,7 @@ def create_app(
                 }
         else:
             issue_items = [None]
+            subseries_items = []
             issue_metadata["."] = {
                 "issue_number": form.get("issue_number_0", ""),
                 "title": form.get("title_0", ""),
@@ -1365,6 +1453,7 @@ def create_app(
         try:
             staged = build_staged_import(
                 session.plan, author=author, series=series, issue_metadata=issue_metadata,
+                subseries_metadata=subseries_metadata,
                 series_complete=_bool_form(form.get("series_complete", "")),
             )
             staging.mkdir(parents=True, exist_ok=True)
@@ -1379,6 +1468,7 @@ def create_app(
                     "session_id": session_id,
                     "plan": session.plan,
                     "issue_items": issue_items,
+                    "subseries_items": subseries_items,
                     "series_default": series or session.plan.scan.content_root.name,
                     "error": str(exc),
                     "author_value": author,
@@ -1662,6 +1752,8 @@ def create_app(
                 "author": author,
                 "series": series,
                 "issue_previews": _issue_preview_map(series),
+                "series_previews": _series_preview_map(author),
+                "lineage": _series_lineage(author, series),
                 "progress": get_progress_map(database, request.state.user.id, [issue.id for issue in series.issues]),
                 "missing_gaps": series_gaps(database, series.id),
             },
@@ -1680,6 +1772,7 @@ def create_app(
             context={
                 "author": author,
                 "series": series,
+                "lineage": _series_lineage(author, series),
                 "issue": issue,
                 "primary": _primary_group(issue),
                 "extras": [group for group in issue.groups if group.role != "primary"],
@@ -1795,7 +1888,11 @@ def create_app(
         author, series = found
         return templates.TemplateResponse(
             request=request, name="edit_series.html",
-            context={"author": author, "series": series, "authors": _author_choices(database), "error": None},
+            context={
+                "author": author, "series": series, "authors": _author_choices(database),
+                "parent_choices": [choice for choice in _series_choices(database) if choice["author_name"] == author.name and choice["id"] != series.id],
+                "error": None,
+            },
         )
 
     @app.post("/series/{series_id}/edit", response_class=HTMLResponse)
@@ -1810,6 +1907,7 @@ def create_app(
                 database, series_id, title=form.get("title", ""),
                 author_id=form.get("author_id", author.id),
                 complete=_bool_form(form.get("complete", "")),
+                parent_series_id=form.get("parent_series_id", "") or None,
             )
             if series.issues:
                 ranked_issues: list[tuple[int, int, str]] = []
@@ -1825,7 +1923,11 @@ def create_app(
         except EditError as exc:
             return templates.TemplateResponse(
                 request=request, name="edit_series.html",
-                context={"author": author, "series": series, "authors": _author_choices(database), "error": str(exc)},
+                context={
+                    "author": author, "series": series, "authors": _author_choices(database),
+                    "parent_choices": [choice for choice in _series_choices(database) if choice["author_name"] == author.name and choice["id"] != series.id],
+                    "error": str(exc),
+                },
                 status_code=400,
             )
         return RedirectResponse(f"/series/{series_id}", status_code=303)
