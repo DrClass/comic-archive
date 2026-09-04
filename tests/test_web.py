@@ -2488,3 +2488,68 @@ def test_import_workspace_can_move_multiple_selected_pages_to_extra_group(tmp_pa
     assert extra_workspace.status_code == 200
     for source_path in source_paths:
         assert source_path in extra_workspace.text
+
+
+def test_import_workspace_recovers_from_disk_after_in_memory_session_loss(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    issue = source / "Issue 1"
+    issue.mkdir(parents=True)
+    for number in range(1, 4):
+        (issue / f"{number:03}.jpg").write_bytes(str(number).encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    _post(
+        client,
+        f"/import/{session_id}/workspace/metadata",
+        data={
+            "folder_path": "Issue 1", "author": "Recovered Artist", "series": "Recovered Comic",
+            "series_complete": "no", "issue_number": "A", "title": "Recovered Issue", "issue_complete": "yes",
+        },
+    )
+    created = _post(client, f"/import/{session_id}/workspace/create-group", data={"owner": "Issue 1", "name": "Textless"})
+    group_path = created.json()["group_path"]
+    active = client.app.state.import_sessions[session_id]
+    page = str(active.plan.scan.primary.media[1].path)
+    _post(client, f"/import/{session_id}/workspace/media-target", data={"source_path": page, "target": group_path})
+
+    state_file = staging / "session_state" / f"import_{session_id}.json"
+    assert state_file.exists()
+    client.app.state.import_sessions.clear()
+
+    recovered_page = client.get(f"/import/{session_id}/review?folder=Issue%201")
+    assert recovered_page.status_code == 200
+    recovered = client.app.state.import_sessions[session_id]
+    assert recovered.workspace_author == "Recovered Artist"
+    assert recovered.workspace_series == "Recovered Comic"
+    assert recovered.workspace_series_complete == "no"
+    assert recovered.workspace_metadata["Issue 1"]["title"] == "Recovered Issue"
+    assert recovered.workspace_virtual_groups[group_path.split(":", 1)[1]]["name"] == "Textless"
+    assert recovered.workspace_media_targets[page] == group_path
+
+
+def test_bulk_import_session_recovers_from_disk_after_in_memory_session_loss(tmp_path: Path):
+    artist = tmp_path / "incoming" / "Artist"
+    for name in ("Comic A", "Comic B"):
+        folder = artist / name
+        folder.mkdir(parents=True)
+        (folder / "001.jpg").write_bytes(name.encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/bulk/scan", data={"selected_path": str(artist), "author": "Artist"}, follow_redirects=False)
+    bulk_id = response.headers["location"].split("/")[-1]
+    assert (staging / "session_state" / f"bulk_{bulk_id}.json").exists()
+    client.app.state.bulk_import_sessions.clear()
+
+    recovered_page = client.get(f"/import/bulk/{bulk_id}")
+    assert recovered_page.status_code == 200
+    recovered = client.app.state.bulk_import_sessions[bulk_id]
+    assert recovered.author == "Artist"
+    assert [candidate.name for candidate in recovered.candidates] == ["Comic A", "Comic B"]

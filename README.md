@@ -585,3 +585,7 @@ Importing is now centered on one tree-based workspace instead of separate Review
 - A selected page set can be dragged from the right-hand page list onto compatible issue/main or issue-extra folders in the left tree.
 - Multi-page moves are validated server-side and cannot cross into unrelated issues.
 - Existing single-page drag sorting remains available.
+
+## Milestone 31 — recoverable import sessions
+
+Import and bulk-import workspace state is persisted under `staging/session_state/` and can be reconstructed after an application restart or loss of in-memory state while the source upload still exists. Persisted state includes workspace metadata, folder-role/order overrides, virtual extra groups, page assignments, staged confirmation data, and bulk progress. Activity updates both the state record and upload-root mtime. Temporary upload data is removed only after successful import, explicit cancellation/finished bulk cleanup, or 12 hours of genuine inactivity.
