@@ -589,3 +589,16 @@ Importing is now centered on one tree-based workspace instead of separate Review
 ## Milestone 31 — recoverable import sessions
 
 Import and bulk-import workspace state is persisted under `staging/session_state/` and can be reconstructed after an application restart or loss of in-memory state while the source upload still exists. Persisted state includes workspace metadata, folder-role/order overrides, virtual extra groups, page assignments, staged confirmation data, and bulk progress. Activity updates both the state record and upload-root mtime. Temporary upload data is removed only after successful import, explicit cancellation/finished bulk cleanup, or 12 hours of genuine inactivity.
+
+## Milestone 32 — card presentation cleanup
+
+- Author cards now use thumbnails from the first available comic/series preview.
+- Series and sub-series cards show aggregate reading status (Unread / In progress / Finished).
+- Completion is shown as a neutral pill only when explicitly Complete or Incomplete; unknown is hidden.
+- Modified dates are smaller/dimmer secondary metadata.
+- Series/sub-series omit `+ 0 extras` when no extras exist.
+- Issue cards no longer prefix issue labels with the word `Issue`; pages, extras, and modified date use separate lines.
+- Issue cards show extra item counts only when extras exist.
+- Series pages with sub-series but no direct issues no longer show an empty Issues section.
+
+Synthetic issue/sub-series creation in the import workspace is intentionally deferred to the next importer milestone because it requires staged page-ownership changes beyond the existing virtual extra-group model.

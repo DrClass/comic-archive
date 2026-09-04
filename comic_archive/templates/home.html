@@ -19,12 +19,18 @@
 <h1>Authors</h1>
 <div class="stats muted"><span>{{ authors|length }} authors</span><span>{{ series_count }} series</span><span>{{ issue_count }} issues</span></div>
 {% if authors %}
-<div class="grid">
+<div class="card-grid">
   {% for author in authors %}
-  <article class="card">
-    <h2><a href="/authors/{{ author.id }}">{{ author.name }}</a></h2>
-    <p class="muted">{{ author.series|length }} series</p>
-  </article>
+  <a class="media-card" href="/authors/{{ author.id }}">
+    <div class="media-card-image">
+      {% set preview = author_previews.get(author.id) %}
+      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
+    </div>
+    <div class="media-card-body">
+      <h2>{{ author.name }}</h2>
+      <p class="muted">{{ author.total_series }} series</p>
+    </div>
+  </a>
   {% endfor %}
 </div>
 {% else %}

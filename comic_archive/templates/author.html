@@ -15,20 +15,18 @@
   <a class="media-card" href="/series/{{ series.id }}">
     <div class="media-card-image">
       {% set preview = series_previews.get(series.id) %}
-      {% if preview %}
-        <img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">
-      {% else %}
-        <div class="card-placeholder">No preview</div>
-      {% endif %}
+      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
     </div>
     <div class="media-card-body">
       <h2>{{ series.title }}</h2>
-      <p class="muted series-summary">
-        <span>{{ series.total_issues }} issue{% if series.total_issues != 1 %}s{% endif %}</span><br>
-        <span>{% if series.complete is sameas true %}Complete{% elif series.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}</span><br>
-        <span>Modified {{ series.effective_updated_at[:10] if series.effective_updated_at else "Unknown" }}</span><br>
-        <span>{{ series.total_pages }} page{% if series.total_pages != 1 %}s{% endif %} + {{ series.total_extras }} extra{% if series.total_extras != 1 %}s{% endif %}</span>
+      <p class="muted">{{ series.total_issues }} issue{% if series.total_issues != 1 %}s{% endif %}</p>
+      <p class="card-badges">
+        {% set status = series_status.get(series.id, 'unread') %}
+        {% if status == 'finished' %}<span class="reading-status finished">Finished</span>{% elif status == 'in-progress' %}<span class="reading-status in-progress">In progress</span>{% else %}<span class="reading-status unread">Unread</span>{% endif %}
+        {% if series.complete is sameas true %}<span class="reading-status completion-status">Complete</span>{% elif series.complete is sameas false %}<span class="reading-status completion-status">Incomplete</span>{% endif %}
       </p>
+      {% if series.effective_updated_at %}<p class="card-modified">Modified {{ series.effective_updated_at[:10] }}</p>{% endif %}
+      <p class="muted">{{ series.total_pages }} page{% if series.total_pages != 1 %}s{% endif %}{% if series.total_extras %} + {{ series.total_extras }} extra{% if series.total_extras != 1 %}s{% endif %}{% endif %}</p>
     </div>
   </a>
 {% else %}

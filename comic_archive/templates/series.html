@@ -5,7 +5,9 @@
 <div class="page-heading">
   <div>
     <h1>{{ series.title }}</h1>
-    <p class="muted">by {{ author.name }} · {% if series.complete is sameas true %}Series complete{% elif series.complete is sameas false %}Series incomplete{% else %}Series completeness unknown{% endif %}{% if series.effective_updated_at %} · Modified {{ series.effective_updated_at[:10] }}{% endif %}</p>
+    <p class="muted">by {{ author.name }}</p>
+    <p class="card-badges">{% if series.complete is sameas true %}<span class="reading-status completion-status">Complete</span>{% elif series.complete is sameas false %}<span class="reading-status completion-status">Incomplete</span>{% endif %}</p>
+    {% if series.effective_updated_at %}<p class="card-modified">Modified {{ series.effective_updated_at[:10] }}</p>{% endif %}
   </div>
   {% if request.state.user.is_admin %}<a class="admin-link" href="/series/{{ series.id }}/edit">Edit series</a>{% endif %}
 </div>
@@ -21,10 +23,14 @@
     </div>
     <div class="media-card-body">
       <h3>{{ child.title }}</h3>
-      <p class="muted">{{ child.total_issues }} issue{% if child.total_issues != 1 %}s{% endif %}<br>
-      {% if child.complete is sameas true %}Complete{% elif child.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}<br>
-      Modified {{ child.effective_updated_at[:10] if child.effective_updated_at else "Unknown" }}<br>
-      {{ child.total_pages }} page{% if child.total_pages != 1 %}s{% endif %} + {{ child.total_extras }} extra{% if child.total_extras != 1 %}s{% endif %}</p>
+      <p class="muted">{{ child.total_issues }} issue{% if child.total_issues != 1 %}s{% endif %}</p>
+      <p class="card-badges">
+        {% set status = series_status.get(child.id, 'unread') %}
+        {% if status == 'finished' %}<span class="reading-status finished">Finished</span>{% elif status == 'in-progress' %}<span class="reading-status in-progress">In progress</span>{% else %}<span class="reading-status unread">Unread</span>{% endif %}
+        {% if child.complete is sameas true %}<span class="reading-status completion-status">Complete</span>{% elif child.complete is sameas false %}<span class="reading-status completion-status">Incomplete</span>{% endif %}
+      </p>
+      {% if child.effective_updated_at %}<p class="card-modified">Modified {{ child.effective_updated_at[:10] }}</p>{% endif %}
+      <p class="muted">{{ child.total_pages }} page{% if child.total_pages != 1 %}s{% endif %}{% if child.total_extras %} + {{ child.total_extras }} extra{% if child.total_extras != 1 %}s{% endif %}{% endif %}</p>
     </div>
   </a>
 {% endfor %}
@@ -80,41 +86,32 @@
 </details>
 {% endif %}
 
+{% if series.issues %}
 <h2>Issues</h2>
 <div class="card-grid">
 {% for issue in series.issues %}
   <a class="media-card" href="/issues/{{ issue.id }}">
     <div class="media-card-image">
       {% set preview = issue_previews.get(issue.id) %}
-      {% if preview %}
-        <img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">
-      {% else %}
-        <div class="card-placeholder">No preview</div>
-      {% endif %}
+      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
     </div>
     <div class="media-card-body">
-      <h3>{% if issue.issue_number %}Issue {{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</h3>
+      <h3>{% if issue.issue_number %}{{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</h3>
       {% if issue.title and issue.issue_number %}<p>{{ issue.title }}</p>{% endif %}
       {% set saved = progress.get(issue.id) %}
-      <p>
-        {% if saved and saved.completed %}
-          <span class="reading-status finished">Finished</span>
-        {% elif saved %}
-          <span class="reading-status in-progress">In progress · page {{ saved.page }}</span>
-        {% else %}
-          <span class="reading-status unread">Unread</span>
-        {% endif %}
+      <p class="card-badges">
+        {% if saved and saved.completed %}<span class="reading-status finished">Finished</span>{% elif saved %}<span class="reading-status in-progress">In progress · page {{ saved.page }}</span>{% else %}<span class="reading-status unread">Unread</span>{% endif %}
+        {% if issue.complete is sameas true %}<span class="reading-status completion-status">Complete</span>{% elif issue.complete is sameas false %}<span class="reading-status completion-status">Incomplete</span>{% endif %}
       </p>
-      <p class="muted">
-        {% set primary = issue.groups|selectattr("role", "equalto", "primary")|first %}
-        {% if primary %}{{ primary.media|length }} page{% if primary.media|length != 1 %}s{% endif %} · {% endif %}
-        {% if issue.complete is sameas true %}Complete{% elif issue.complete is sameas false %}Incomplete{% else %}Completeness unknown{% endif %}
-        {% if issue.updated_at %} · Modified {{ issue.updated_at[:10] }}{% endif %}
-      </p>
+      {% set primary = issue.groups|selectattr("role", "equalto", "primary")|first %}
+      {% set extras = issue.groups|rejectattr("role", "equalto", "primary")|list %}
+      {% set ns = namespace(extra_count=0) %}{% for group in extras %}{% set ns.extra_count = ns.extra_count + group.media|length %}{% endfor %}
+      {% if primary %}<p class="muted">{{ primary.media|length }} page{% if primary.media|length != 1 %}s{% endif %}</p>{% endif %}
+      {% if ns.extra_count %}<p class="muted">{{ ns.extra_count }} extra{% if ns.extra_count != 1 %}s{% endif %}</p>{% endif %}
+      {% if issue.updated_at %}<p class="card-modified">Modified {{ issue.updated_at[:10] }}</p>{% endif %}
     </div>
   </a>
-{% else %}
-  <p>No issues.</p>
 {% endfor %}
 </div>
+{% endif %}
 {% endblock %}

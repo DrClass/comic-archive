@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 import time
 import re
 import json
@@ -83,7 +84,7 @@ def test_home_author_series_issue_navigation(tmp_path: Path):
 
     response = client.get(f"/series/{result.series_id}")
     assert response.status_code == 200
-    assert "Issue 1" in response.text
+    assert ">1</h3>" in response.text
 
     response = client.get(f"/issues/{result.issue_ids[0]}")
     assert response.status_code == 200
@@ -2065,8 +2066,9 @@ def test_author_page_reports_series_summary_totals(tmp_path: Path):
     response = client.get(f"/authors/{result.author_id}")
     assert response.status_code == 200
     assert "1 issue" in response.text
-    assert "Completeness unknown" in response.text
+    assert "Completeness unknown" not in response.text
     assert "1 page + 1 extra" in response.text
+    assert "Unread" in response.text
     assert "Issue 1: 1 page" not in response.text
 
 
@@ -2083,7 +2085,7 @@ def test_series_completeness_can_be_edited_in_web_ui(tmp_path: Path):
     assert response.status_code == 303
     assert read_library(database)[0].series[0].complete is False
     page = client.get(f"/series/{result.series_id}")
-    assert "Series incomplete" in page.text
+    assert ">Incomplete</span>" in page.text
 
 
 def test_import_keepalive_marks_active_bulk_work_as_recent(tmp_path: Path):
@@ -2553,3 +2555,40 @@ def test_bulk_import_session_recovers_from_disk_after_in_memory_session_loss(tmp
     recovered = client.app.state.bulk_import_sessions[bulk_id]
     assert recovered.author == "Artist"
     assert [candidate.name for candidate in recovered.candidates] == ["Comic A", "Comic B"]
+
+
+def test_card_cleanup_hides_unknown_and_zero_extras_and_authors_have_preview(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    client = _admin_client(database, library)
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert f'/thumbnail/' in home.text
+    assert f'/authors/{result.author_id}' in home.text
+
+    # Remove the single extra so the series summary should not advertise + 0 extras.
+    with sqlite3.connect(database) as db:
+        group = db.execute("SELECT id FROM content_groups WHERE series_id = ? AND role != 'primary' LIMIT 1", (result.series_id,)).fetchone()
+        if group:
+            db.execute("UPDATE media SET active = 0 WHERE group_id = ?", (group[0],))
+    author = client.get(f"/authors/{result.author_id}")
+    assert author.status_code == 200
+    assert "+ 0 extra" not in author.text
+    assert "Completeness unknown" not in author.text
+    assert "Unread" in author.text
+
+
+def test_series_without_direct_issues_hides_issues_section(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    client = _admin_client(database, library)
+    # Create an empty parent and make the existing series its child.
+    parent_id = "parent-series"
+    with sqlite3.connect(database) as db:
+        author_id = db.execute("SELECT author_id FROM series WHERE id = ?", (result.series_id,)).fetchone()[0]
+        db.execute("INSERT INTO series(id, author_id, title, parent_series_id, sort_order) VALUES (?, ?, ?, NULL, 1)", (parent_id, author_id, "Parent"))
+        db.execute("UPDATE series SET parent_series_id = ?, sort_order = 1 WHERE id = ?", (parent_id, result.series_id))
+    page = client.get(f"/series/{parent_id}")
+    assert page.status_code == 200
+    assert "Sub-series" in page.text
+    assert "<h2>Issues</h2>" not in page.text
+    assert "No issues." not in page.text

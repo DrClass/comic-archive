@@ -102,6 +102,12 @@ def _walk_series(series_items: Iterable[SeriesView]):
         yield from _walk_series(series.children)
 
 
+def _walk_issues(series: SeriesView):
+    yield from series.issues
+    for child in series.children:
+        yield from _walk_issues(child)
+
+
 def _find_series(authors: Iterable[AuthorView], series_id: str) -> tuple[AuthorView, SeriesView] | None:
     for author in authors:
         for series in _walk_series(author.series):
@@ -170,6 +176,41 @@ def _series_preview_map(author: AuthorView) -> dict[str, MediaView]:
         media = first_preview(series)
         if media is not None:
             previews[series.id] = media
+    return previews
+
+
+def _series_issue_ids(series: SeriesView) -> list[str]:
+    ids = [issue.id for issue in series.issues]
+    for child in series.children:
+        ids.extend(_series_issue_ids(child))
+    return ids
+
+
+def _series_reading_status(series: SeriesView, progress: dict[str, object]) -> str:
+    issue_ids = _series_issue_ids(series)
+    if not issue_ids:
+        return "unread"
+    saved = [progress.get(issue_id) for issue_id in issue_ids]
+    if all(item is not None and item.completed for item in saved):
+        return "finished"
+    if all(item is None for item in saved):
+        return "unread"
+    return "in-progress"
+
+
+def _series_status_map(author: AuthorView, progress: dict[str, object]) -> dict[str, str]:
+    return {series.id: _series_reading_status(series, progress) for series in _walk_series(author.series)}
+
+
+def _author_preview_map(authors: list[AuthorView]) -> dict[str, MediaView]:
+    previews: dict[str, MediaView] = {}
+    for author in authors:
+        series_previews = _series_preview_map(author)
+        for series in author.series:
+            media = series_previews.get(series.id)
+            if media is not None:
+                previews[author.id] = media
+                break
     return previews
 
 
@@ -1502,8 +1543,8 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
         authors = read_library(database)
-        series_count = sum(len(author.series) for author in authors)
-        issue_count = sum(len(series.issues) for author in authors for series in author.series)
+        series_count = sum(author.total_series for author in authors)
+        issue_count = sum(series.total_issues for author in authors for series in author.series)
         return templates.TemplateResponse(
             request=request,
             name="home.html",
@@ -1511,6 +1552,7 @@ def create_app(
                 "authors": authors,
                 "series_count": series_count,
                 "issue_count": issue_count,
+                "author_previews": _author_preview_map(authors),
                 "continue_reading": get_continue_reading(database, request.state.user.id),
             },
         )
@@ -2644,10 +2686,16 @@ def create_app(
         author = _find_author(authors, author_id)
         if author is None:
             raise HTTPException(status_code=404, detail="Author not found")
+        issue_ids = [issue.id for series in author.series for issue in _walk_issues(series)]
+        progress = get_progress_map(database, request.state.user.id, issue_ids)
         return templates.TemplateResponse(
             request=request,
             name="author.html",
-            context={"author": author, "series_previews": _series_preview_map(author)},
+            context={
+                "author": author,
+                "series_previews": _series_preview_map(author),
+                "series_status": _series_status_map(author, progress),
+            },
         )
 
     @app.get("/series/{series_id}", response_class=HTMLResponse)
@@ -2657,6 +2705,8 @@ def create_app(
         if found is None:
             raise HTTPException(status_code=404, detail="Series not found")
         author, series = found
+        all_issue_ids = _series_issue_ids(series)
+        progress = get_progress_map(database, request.state.user.id, all_issue_ids)
         return templates.TemplateResponse(
             request=request,
             name="series.html",
@@ -2666,7 +2716,8 @@ def create_app(
                 "issue_previews": _issue_preview_map(series),
                 "series_previews": _series_preview_map(author),
                 "lineage": _series_lineage(author, series),
-                "progress": get_progress_map(database, request.state.user.id, [issue.id for issue in series.issues]),
+                "progress": progress,
+                "series_status": _series_status_map(author, progress),
                 "missing_gaps": series_gaps(database, series.id),
             },
         )
