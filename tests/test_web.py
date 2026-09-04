@@ -1,6 +1,7 @@
 from pathlib import Path
 import time
 import re
+import json
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -2242,3 +2243,248 @@ def test_nested_series_browsing_and_parent_edit_controls(tmp_path: Path):
     edit_page = client.get(f"/series/{child.id}/edit")
     assert 'name="parent_series_id"' in edit_page.text
     assert f'value="{result.series_id}" selected' in edit_page.text
+
+
+def test_import_workspace_shows_full_tree_and_can_reclassify_flattened_folder(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    for path in (
+        "Issue 1/Pages/001.jpg",
+        "Issue 1/Gallery/bonus.png",
+        "Issue 2/001.jpg",
+    ):
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    client = _admin_client(database, library)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    review_url = response.headers["location"]
+    session_id = review_url.split("/")[2]
+    workspace = client.get(review_url)
+    assert workspace.status_code == 200
+    assert "Import workspace" in workspace.text
+    assert "Issue 1/" in workspace.text
+    assert "Pages/" in workspace.text
+    assert "Gallery/" in workspace.text
+    assert "Issue 2/" in workspace.text
+
+    changed = _post(
+        client,
+        f"/import/{session_id}/workspace/role",
+        data={"folder_path": "Issue 1/Gallery", "role": "issue-extras"},
+        follow_redirects=False,
+    )
+    assert changed.status_code == 303
+    updated = client.get(changed.headers["location"])
+    assert "Gallery/" in updated.text
+    gallery_section = updated.text[updated.text.index("Gallery/"):]
+    assert "Issue-Extras" in gallery_section[:1200]
+
+
+def test_import_workspace_folder_drag_order_feeds_metadata_order(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    for issue in ("Chapter C", "Chapter A", "Chapter B"):
+        target = source / issue / "001.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(issue.encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    client = _admin_client(database, library)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    ordered = ["Chapter C", "Chapter A", "Chapter B"]
+    saved = _post(
+        client,
+        f"/import/{session_id}/workspace/folder-order",
+        data={"parent": ".", "ordered_paths": __import__("json").dumps(ordered)},
+    )
+    assert saved.status_code == 204
+
+    continued = _post(client, f"/import/{session_id}/review", follow_redirects=False)
+    assert continued.status_code == 303
+    metadata = client.get(continued.headers["location"])
+    positions = [metadata.text.index(f"<legend>{name}</legend>") for name in ordered]
+    assert positions == sorted(positions)
+
+
+def test_import_workspace_page_reorder_reaches_staging(tmp_path: Path):
+    source = tmp_path / "incoming" / "One Shot"
+    source.mkdir(parents=True)
+    for name in ("001.jpg", "002.jpg", "003.jpg"):
+        (source / name).write_bytes(name.encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    workspace = client.get(response.headers["location"])
+    assert "Import workspace" in workspace.text
+    paths = re.findall(r'class="workspace-media-row" draggable="true" data-source="([^"]+)"', workspace.text)
+    assert len(paths) == 3
+    reversed_paths = list(reversed(paths))
+    saved = _post(
+        client,
+        f"/import/{session_id}/workspace/media-order",
+        data={"folder_path": ".", "ordered_paths": __import__("json").dumps(reversed_paths)},
+    )
+    assert saved.status_code == 204
+
+    _post(client, f"/import/{session_id}/review", follow_redirects=False)
+    staged_response = _post(
+        client,
+        f"/import/{session_id}/metadata",
+        data={
+            "author": "Artist",
+            "series": "One Shot",
+            "series_complete": "",
+            "sort_order_0": "1",
+            "issue_number_0": "",
+            "title_0": "",
+            "complete_0": "",
+        },
+        follow_redirects=False,
+    )
+    assert staged_response.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    assert staged is not None
+    media = staged.issues[0].groups[0].media
+    assert [item.source_path for item in media] == reversed_paths
+
+
+def test_import_workspace_uses_natural_folder_order(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    for number in (1, 2, 3, 10, 11, 12):
+        target = source / f"Issue {number}" / "001.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(str(number).encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    client = _admin_client(database, library)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    workspace = client.get(response.headers["location"])
+    positions = [workspace.text.index(f"Issue {number}/") for number in (1, 2, 3, 10, 11, 12)]
+    assert positions == sorted(positions)
+
+
+def test_import_workspace_can_finalize_metadata_and_created_extra_without_organizer(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    issue = source / "Issue 1"
+    issue.mkdir(parents=True)
+    (issue / "001.jpg").write_bytes(b"one")
+    (issue / "002.jpg").write_bytes(b"two")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    workspace = client.get(response.headers["location"])
+    assert "Comic metadata" in workspace.text
+    assert "Validate and continue to confirmation" in workspace.text
+
+    saved_root = _post(
+        client,
+        f"/import/{session_id}/workspace/metadata",
+        data={"folder_path": "Issue 1", "author": "Artist", "series": "Comic", "series_complete": "yes", "issue_number": "Special", "title": "Opening", "issue_complete": "yes"},
+    )
+    assert saved_root.status_code == 204
+    saved_issue = saved_root
+    assert saved_issue.status_code == 204
+
+    created = _post(
+        client,
+        f"/import/{session_id}/workspace/create-group",
+        data={"owner": "Issue 1", "name": "Textless"},
+    )
+    assert created.status_code == 200
+    group_path = created.json()["group_path"]
+    session = client.app.state.import_sessions[session_id]
+    source_path = str(session.plan.scan.primary.media[1].path)
+    moved = _post(
+        client,
+        f"/import/{session_id}/workspace/media-target",
+        data={"source_path": source_path, "target": group_path},
+    )
+    assert moved.status_code == 204
+
+    finalized = _post(
+        client,
+        f"/import/{session_id}/workspace/finalize",
+        data={"author": "Artist", "series": "Comic", "series_complete": "yes", "selected": "Issue 1"},
+        follow_redirects=False,
+    )
+    assert finalized.status_code == 303
+    assert finalized.headers["location"] == f"/import/{session_id}/confirm"
+    staged = client.app.state.import_sessions[session_id].staged
+    assert staged is not None
+    assert staged.author == "Artist"
+    assert staged.series == "Comic"
+    assert staged.series_complete is True
+    staged_issue = staged.issues[0]
+    assert staged_issue.issue_number == "Special"
+    assert staged_issue.title == "Opening"
+    assert staged_issue.complete is True
+    primary = next(group for group in staged_issue.groups if group.role == "primary")
+    extra = next(group for group in staged_issue.groups if group.name == "Textless")
+    assert len(primary.media) == 1
+    assert len(extra.media) == 1
+    assert extra.media[0].source_path == source_path
+
+
+def test_import_workspace_metadata_is_autosave_and_page_target_dropdown_is_removed(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    issue = source / "Issue 1"
+    extras = issue / "Extras"
+    extras.mkdir(parents=True)
+    (issue / "001.jpg").write_bytes(b"one")
+    (extras / "bonus.jpg").write_bytes(b"bonus")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    client = _admin_client(database, library)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    workspace = client.get(response.headers["location"])
+    assert workspace.status_code == 200
+    assert "Changes save automatically" in workspace.text
+    assert 'class="workspace-media-target"' not in workspace.text
+    assert 'data-media-target="true"' in workspace.text
+    assert "Ctrl/Cmd-click selects multiple pages" in workspace.text
+
+
+def test_import_workspace_can_move_multiple_selected_pages_to_extra_group(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    issue = source / "Issue 1"
+    issue.mkdir(parents=True)
+    for number in range(1, 4):
+        (issue / f"{number:03}.jpg").write_bytes(str(number).encode())
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    client = _admin_client(database, library)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    created = _post(client, f"/import/{session_id}/workspace/create-group", data={"owner": "Issue 1", "name": "Textless"})
+    assert created.status_code == 200
+    group_path = created.json()["group_path"]
+    session = client.app.state.import_sessions[session_id]
+    source_paths = [str(item.path) for item in session.plan.scan.primary.media[:2]]
+
+    moved = _post(
+        client,
+        f"/import/{session_id}/workspace/media-targets",
+        data={"source_paths": json.dumps(source_paths), "target": group_path},
+    )
+    assert moved.status_code == 204
+    assert all(session.workspace_media_targets[path] == group_path for path in source_paths)
+
+    extra_workspace = client.get(f"/import/{session_id}/review?folder={group_path}")
+    assert extra_workspace.status_code == 200
+    for source_path in source_paths:
+        assert source_path in extra_workspace.text

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import secrets
 import time
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 from urllib.parse import parse_qs
@@ -18,7 +19,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .importer.commit import CommitError, commit_staged_import, initialize_database
 from .importer.review import ReviewError, ReviewPlan, ReviewRole, build_review_plan, flattened_folder_candidates
-from .importer.scanner import FolderScanError, scan_folder
+from .importer.scanner import FolderScanError, SUPPORTED_MEDIA, scan_folder
+from .importer.sorting import natural_text_key
 from .importer.bulk import BulkComicCandidate, discover_artist_comics
 from .importer.staging import StagedImport, StagingError, build_staged_import, create_staged_issue_extra, move_staged_media, remove_empty_staged_group
 from .library import AuthorView, GroupView, IssueView, MediaView, SeriesView, read_library
@@ -62,6 +64,15 @@ class ImportSession:
     last_activity: float = field(default_factory=time.time)
     extra_folder_overrides: set[str] = field(default_factory=set)
     subseries_folder_overrides: set[str] = field(default_factory=set)
+    primary_folder_overrides: set[str] = field(default_factory=set)
+    container_folder_overrides: set[str] = field(default_factory=set)
+    folder_order_overrides: dict[str, list[str]] = field(default_factory=dict)
+    workspace_author: str | None = None
+    workspace_series: str | None = None
+    workspace_series_complete: str = ""
+    workspace_metadata: dict[str, dict[str, str]] = field(default_factory=dict)
+    workspace_virtual_groups: dict[str, dict[str, str]] = field(default_factory=dict)
+    workspace_media_targets: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -378,6 +389,315 @@ def _review_source_relative(scan, relative_path: Path) -> str:
     return str(prefix / relative_path) if prefix != Path('.') else str(relative_path)
 
 
+def _workspace_source_relative(scan, path: Path) -> str:
+    rel = path.resolve().relative_to(scan.source.resolve())
+    return "." if rel == Path(".") else rel.as_posix()
+
+
+def _workspace_content_relative(scan, source_relative: str) -> Path | None:
+    source_path = (scan.source / source_relative).resolve() if source_relative != "." else scan.source.resolve()
+    try:
+        return source_path.relative_to(scan.content_root.resolve())
+    except ValueError:
+        return None
+
+
+def _workspace_role_map(plan: ReviewPlan) -> dict[str, tuple[str, object | None]]:
+    scan = plan.scan
+    roles: dict[str, tuple[str, object | None]] = {}
+    root_key = _workspace_source_relative(scan, scan.content_root)
+    roles[root_key] = ("Series" if scan.is_series_candidate else "Issue", None)
+    for item in plan.items:
+        key = _review_source_relative(scan, item.relative_path).replace("\\", "/")
+        label = {
+            ReviewRole.SUBSERIES: "Sub-Series",
+            ReviewRole.ISSUE: "Issue",
+            ReviewRole.ISSUE_EXTRA: "Issue-Extras",
+            ReviewRole.SERIES_EXTRA: "Series-Extras",
+            ReviewRole.PRIMARY: "Primary Pages",
+        }[item.role]
+        if key == root_key and item.role is ReviewRole.PRIMARY:
+            continue
+        roles[key] = (label, item)
+    for candidate in flattened_folder_candidates(scan):
+        key = str(candidate.relative_path).replace("\\", "/")
+        roles.setdefault(key, ("Primary Pages", None))
+    return roles
+
+
+def _workspace_has_media(path: Path) -> bool:
+    try:
+        return any(
+            child.is_file() and child.suffix.casefold() in SUPPORTED_MEDIA
+            for child in path.rglob("*")
+        )
+    except OSError:
+        return False
+
+
+def _workspace_direct_media_count(path: Path) -> int:
+    try:
+        return sum(
+            1 for child in path.iterdir()
+            if child.is_file() and child.suffix.casefold() in SUPPORTED_MEDIA
+        )
+    except OSError:
+        return 0
+
+
+def _workspace_sort_children(session: ImportSession, parent_key: str, children: list[Path]) -> list[Path]:
+    override = session.folder_order_overrides.get(parent_key, [])
+    rank = {value: index for index, value in enumerate(override)}
+    return sorted(
+        children,
+        key=lambda child: (
+            rank.get(_workspace_source_relative(session.plan.scan, child), len(rank) + 1),
+            natural_text_key(child.name),
+        ),
+    )
+
+
+def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> list[dict[str, object]]:
+    scan = session.plan.scan
+    role_map = _workspace_role_map(session.plan)
+    root = scan.content_root
+    nodes: list[dict[str, object]] = []
+
+    def visit(path: Path, depth: int) -> None:
+        key = _workspace_source_relative(scan, path)
+        role, item = role_map.get(key, ("Container", None))
+        if key in session.container_folder_overrides:
+            role = "Container"
+        children = [child for child in path.iterdir() if child.is_dir() and _workspace_has_media(child)]
+        children = _workspace_sort_children(session, key, children)
+        nodes.append({
+            "path": key,
+            "name": path.name,
+            "depth": depth,
+            "role": role,
+            "direct_files": _workspace_direct_media_count(path),
+            "child_count": len(children),
+            "is_root": path.resolve() == root.resolve(),
+            "item": item,
+            "parent": _workspace_source_relative(scan, path.parent) if path.resolve() != root.resolve() else None,
+        })
+        for child in children:
+            visit(child, depth + 1)
+        if include_virtual and role == "Issue":
+            for group_id, group in session.workspace_virtual_groups.items():
+                if group.get("owner") == key:
+                    nodes.append(_workspace_virtual_node(session, group_id, group, depth + 1))
+
+    visit(root, 0)
+    return nodes
+
+
+
+def _workspace_item_key(session: ImportSession, item) -> str:
+    return _review_source_relative(session.plan.scan, item.relative_path).replace("\\", "/")
+
+
+def _workspace_node_metadata(session: ImportSession, node: dict[str, object]) -> dict[str, str]:
+    key = str(node["path"])
+    saved = dict(session.workspace_metadata.get(key, {}))
+    role = str(node["role"])
+    item = node.get("item")
+    if role == "Issue":
+        default_label = getattr(item, "name", None) or str(node["name"])
+        saved.setdefault("issue_number", default_label)
+        saved.setdefault("title", "")
+        saved.setdefault("complete", "")
+    elif role == "Sub-Series":
+        saved.setdefault("title", getattr(item, "name", None) or str(node["name"]))
+        saved.setdefault("complete", "")
+    elif role in {"Issue-Extras", "Series-Extras"}:
+        saved.setdefault("title", getattr(item, "name", None) or str(node["name"]))
+    return saved
+
+
+def _workspace_virtual_node(session: ImportSession, group_id: str, group: dict[str, str], depth: int) -> dict[str, object]:
+    key = f"virtual:{group_id}"
+    return {
+        "path": key,
+        "name": group["name"],
+        "depth": depth,
+        "role": "Issue-Extras",
+        "direct_files": sum(1 for target in session.workspace_media_targets.values() if target == key),
+        "child_count": 0,
+        "is_root": False,
+        "item": None,
+        "parent": group["owner"],
+        "virtual": True,
+    }
+
+
+def _workspace_all_media(session: ImportSession) -> list[object]:
+    result: list[object] = []
+    scan = session.plan.scan
+    if scan.primary:
+        result.extend(scan.primary.media)
+    for group in scan.extras:
+        result.extend(group.media)
+    for issue in scan.issues:
+        if issue.primary:
+            result.extend(issue.primary.media)
+        for group in issue.extras:
+            result.extend(group.media)
+    seen: set[str] = set()
+    unique = []
+    for item in result:
+        key = str(item.path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _workspace_origin_for_media(session: ImportSession, media_path: str) -> str | None:
+    for node in _workspace_tree(session, include_virtual=False):
+        if node["is_root"] and node["role"] not in {"Issue", "Primary Pages"}:
+            continue
+        for media in _workspace_media_for_folder_base(session, str(node["path"])):
+            if str(media.path) == media_path:
+                return str(node["path"])
+    return None
+
+
+def _workspace_media_targets_for_folder(session: ImportSession, folder_key: str) -> list[tuple[str, str]]:
+    tree = _workspace_tree(session)
+    node = next((item for item in tree if str(item["path"]) == folder_key), None)
+    if node is None:
+        return []
+    if str(node["role"]) == "Issue":
+        owner = folder_key
+    elif str(node["role"]) == "Issue-Extras":
+        owner = str(node.get("parent") or "")
+        # A real nested extras folder's parent can be a page container. Resolve
+        # ownership from the review item when possible.
+        item = node.get("item")
+        issue_path = getattr(item, "issue_path", None) if item is not None else None
+        if issue_path is not None:
+            owner = _review_source_relative(session.plan.scan, issue_path).replace("\\", "/")
+    else:
+        return []
+    choices: list[tuple[str, str]] = [(owner, "Main comic")]
+    for candidate in tree:
+        if str(candidate["role"]) != "Issue-Extras":
+            continue
+        candidate_owner = str(candidate.get("parent") or "")
+        item = candidate.get("item")
+        issue_path = getattr(item, "issue_path", None) if item is not None else None
+        if issue_path is not None:
+            candidate_owner = _review_source_relative(session.plan.scan, issue_path).replace("\\", "/")
+        if candidate_owner == owner:
+            choices.append((str(candidate["path"]), str(candidate["name"])))
+    return choices
+
+def _workspace_media_for_folder_base(session: ImportSession, folder_key: str) -> list[object]:
+    scan = session.plan.scan
+    content_rel = _workspace_content_relative(scan, folder_key)
+    if content_rel is None:
+        return []
+    role_map = _workspace_role_map(session.plan)
+    role_item = role_map.get(folder_key)
+    item = role_item[1] if role_item else None
+
+    if item is not None:
+        if getattr(item, "source_kind", None) == "issue":
+            issue = next((issue for issue in scan.issues if issue.relative_path == item.relative_path), None)
+            return list(issue.primary.media) if issue and issue.primary else []
+        if getattr(item, "source_kind", None) == "group":
+            for issue in scan.issues:
+                if issue.primary and issue.primary.relative_path == item.relative_path:
+                    return list(issue.primary.media)
+                for group in issue.extras:
+                    if group.relative_path == item.relative_path:
+                        return list(group.media)
+            for group in scan.extras:
+                if group.relative_path == item.relative_path:
+                    return list(group.media)
+        if getattr(item, "source_kind", None) == "subseries":
+            return []
+
+    # Flattened page containers do not have their own ReviewItem yet. Select
+    # only the primary media whose virtual relative path sits below this folder.
+    media_items = []
+    if scan.is_series_candidate:
+        for issue in scan.issues:
+            if not issue.primary:
+                continue
+            issue_key = issue.relative_path
+            try:
+                suffix = content_rel.relative_to(issue_key)
+            except ValueError:
+                continue
+            for media in issue.primary.media:
+                if suffix == Path(".") or suffix in media.relative_path.parents or media.relative_path.parent == suffix:
+                    media_items.append(media)
+    elif scan.primary:
+        for media in scan.primary.media:
+            if content_rel == Path(".") or content_rel in media.relative_path.parents or media.relative_path.parent == content_rel:
+                media_items.append(media)
+    return media_items
+
+
+
+def _workspace_media_for_folder(session: ImportSession, folder_key: str) -> list[object]:
+    if folder_key.startswith("virtual:"):
+        return [
+            item for item in _workspace_all_media(session)
+            if session.workspace_media_targets.get(str(item.path)) == folder_key
+        ]
+    base = _workspace_media_for_folder_base(session, folder_key)
+    result = [
+        item for item in base
+        if session.workspace_media_targets.get(str(item.path), folder_key) == folder_key
+    ]
+    # Include pages explicitly moved here from another group.
+    existing = {str(item.path) for item in result}
+    for item in _workspace_all_media(session):
+        if session.workspace_media_targets.get(str(item.path)) == folder_key and str(item.path) not in existing:
+            result.append(item)
+    result.sort(key=lambda item: item.order)
+    return result
+
+
+def _workspace_reorder_media(session: ImportSession, ordered_source_paths: list[str]) -> None:
+    if not ordered_source_paths:
+        return
+    rank = {value: index for index, value in enumerate(ordered_source_paths)}
+
+    def reorder(items: list) -> None:
+        matching = [item for item in items if str(item.path) in rank]
+        if len(matching) != len(ordered_source_paths):
+            return
+        items.sort(key=lambda item: (rank.get(str(item.path), len(rank) + item.order), item.order))
+        items[:] = [replace(item, order=index) for index, item in enumerate(items, start=1)]
+
+    if session.plan.scan.primary:
+        reorder(session.plan.scan.primary.media)
+    for group in session.plan.scan.extras:
+        reorder(group.media)
+    for issue in session.plan.scan.issues:
+        if issue.primary:
+            reorder(issue.primary.media)
+        for group in issue.extras:
+            reorder(group.media)
+
+
+def _workspace_sorted_review_items(session: ImportSession, role: ReviewRole) -> list:
+    items = [item for item in session.plan.items if item.role is role]
+    def key(item):
+        source_key = _review_source_relative(session.plan.scan, item.relative_path).replace("\\", "/")
+        parent = str(Path(source_key).parent).replace("\\", "/")
+        if parent == "": parent = "."
+        order = session.folder_order_overrides.get(parent, [])
+        try: rank = order.index(source_key)
+        except ValueError: rank = len(order) + 1000
+        return (parent.casefold(), rank, item.relative_path.as_posix().casefold())
+    return sorted(items, key=key)
+
+
 
 def _touch_upload_root(path: Path | None, now: float | None = None) -> None:
     if path is None or not path.exists():
@@ -388,6 +708,17 @@ def _touch_upload_root(path: Path | None, now: float | None = None) -> None:
         os.utime(path, (stamp, stamp))
     except OSError:
         pass
+
+
+def _rescan_import_session(session: ImportSession) -> None:
+    scan = scan_folder(
+        session.plan.scan.source,
+        extra_folders=sorted(session.extra_folder_overrides),
+        primary_folders=sorted(session.primary_folder_overrides),
+        subseries_folders=sorted(session.subseries_folder_overrides),
+        pdf_cache_root=session.pdf_cache_root,
+    )
+    session.plan = build_review_plan(scan)
 
 
 def _touch_import_activity(app: FastAPI, session: ImportSession) -> None:
@@ -1280,26 +1611,411 @@ def create_app(
     def import_review(request: Request, session_id: str):
         session = _session_or_404(app, session_id)
         _touch_import_activity(app, session)
-        role_choices = {
-            index: _review_role_choices(item, is_series=session.plan.scan.is_series_candidate)
-            for index, item in enumerate(session.plan.items)
-        }
+        tree = _workspace_tree(session)
+        requested = request.query_params.get("folder", "")
+        selected = requested if any(node["path"] == requested for node in tree) else str(tree[0]["path"])
+        selected_node = next(node for node in tree if node["path"] == selected)
+        media = _workspace_media_for_folder(session, selected)
         return templates.TemplateResponse(
             request=request,
-            name="import_review.html",
+            name="import_workspace.html",
             context={
-                "session_id": session_id, "plan": session.plan, "role_choices": role_choices, "errors": [],
-                "flattened_folders": [
-                    item for item in flattened_folder_candidates(session.plan.scan)
-                    if str(item.relative_path) not in session.extra_folder_overrides
-                ],
-                "subseries_candidates": {
-                    index: _review_source_relative(session.plan.scan, item.relative_path)
-                    for index, item in enumerate(session.plan.items)
-                    if item.source_kind == "issue"
-                },
+                "session_id": session_id,
+                "plan": session.plan,
+                "tree": tree,
+                "selected": selected,
+                "selected_node": selected_node,
+                "selected_media": media,
+                "selected_metadata": _workspace_node_metadata(session, selected_node),
+                "media_targets": _workspace_media_targets_for_folder(session, selected),
+                "media_target_paths": {path for path, _ in _workspace_media_targets_for_folder(session, selected)},
+                "author_value": session.workspace_author if session.workspace_author is not None else (session.author_default or ""),
+                "series_value": session.workspace_series if session.workspace_series is not None else (session.series_default or session.plan.scan.content_root.name),
+                "series_complete_value": session.workspace_series_complete,
+                "errors": [],
             },
         )
+
+    @app.post("/import/{session_id}/workspace/metadata")
+    async def import_workspace_metadata(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        folder = form.get("folder_path", "").strip()
+        tree = _workspace_tree(session)
+        node = next((item for item in tree if str(item["path"]) == folder), None)
+        if node is None:
+            raise HTTPException(status_code=400, detail="Unknown workspace folder")
+        if node["is_root"]:
+            session.workspace_author = form.get("author", session.workspace_author or session.author_default or "").strip()
+            session.workspace_series = form.get("series", session.workspace_series or session.series_default or session.plan.scan.content_root.name).strip()
+            value = form.get("series_complete", session.workspace_series_complete).strip()
+            if value not in {"", "yes", "no"}:
+                raise HTTPException(status_code=400, detail="Invalid completeness value")
+            session.workspace_series_complete = value
+            if str(node["role"]) == "Issue":
+                data = session.workspace_metadata.setdefault(folder, {})
+                data["issue_number"] = form.get("issue_number", data.get("issue_number", "")).strip()
+                data["title"] = form.get("title", data.get("title", "")).strip()
+                issue_complete = form.get("issue_complete", data.get("complete", "")).strip()
+                if issue_complete not in {"", "yes", "no"}:
+                    raise HTTPException(status_code=400, detail="Invalid issue completeness value")
+                data["complete"] = issue_complete
+        else:
+            data = session.workspace_metadata.setdefault(folder, {})
+            role = str(node["role"])
+            if role == "Issue":
+                data["issue_number"] = form.get("issue_number", "").strip()
+                data["title"] = form.get("title", "").strip()
+                value = form.get("complete", "").strip()
+                if value not in {"", "yes", "no"}:
+                    raise HTTPException(status_code=400, detail="Invalid completeness value")
+                data["complete"] = value
+            elif role == "Sub-Series":
+                title = form.get("title", "").strip()
+                if not title:
+                    raise HTTPException(status_code=400, detail="Sub-series title cannot be empty")
+                data["title"] = title
+                value = form.get("complete", "").strip()
+                if value not in {"", "yes", "no"}:
+                    raise HTTPException(status_code=400, detail="Invalid completeness value")
+                data["complete"] = value
+            elif role in {"Issue-Extras", "Series-Extras"}:
+                title = form.get("title", "").strip()
+                if not title:
+                    raise HTTPException(status_code=400, detail="Group name cannot be empty")
+                if str(node["path"]).startswith("virtual:"):
+                    group_id = str(node["path"]).split(":", 1)[1]
+                    session.workspace_virtual_groups[group_id]["name"] = title
+                else:
+                    item = node.get("item")
+                    if item is not None:
+                        session.plan.set_name(item.relative_path, title)
+                data["title"] = title
+        return Response(status_code=204)
+
+    @app.post("/import/{session_id}/workspace/create-group")
+    async def import_workspace_create_group(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        owner = form.get("owner", "").strip()
+        name = form.get("name", "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Extra group name cannot be empty")
+        tree = _workspace_tree(session)
+        node = next((item for item in tree if str(item["path"]) == owner and str(item["role"]) == "Issue"), None)
+        if node is None:
+            raise HTTPException(status_code=400, detail="Extra groups must be created under an issue")
+        existing = [
+            str(item["name"]).casefold() for item in tree
+            if str(item.get("parent") or "") == owner and str(item["role"]) == "Issue-Extras"
+        ]
+        if name.casefold() in existing:
+            raise HTTPException(status_code=400, detail="This issue already has an extra group with that name")
+        group_id = str(uuid4())
+        session.workspace_virtual_groups[group_id] = {"owner": owner, "name": name}
+        return JSONResponse({"group_path": f"virtual:{group_id}"})
+
+    @app.post("/import/{session_id}/workspace/remove-group")
+    async def import_workspace_remove_group(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        folder = form.get("folder_path", "").strip()
+        if not folder.startswith("virtual:"):
+            raise HTTPException(status_code=400, detail="Only groups created in this workspace can be removed here")
+        group_id = folder.split(":", 1)[1]
+        if group_id not in session.workspace_virtual_groups:
+            raise HTTPException(status_code=404, detail="Workspace group not found")
+        # Return assigned pages to their original scanned groups.
+        for source_path, target in list(session.workspace_media_targets.items()):
+            if target == folder:
+                session.workspace_media_targets.pop(source_path, None)
+        session.workspace_virtual_groups.pop(group_id, None)
+        session.workspace_metadata.pop(folder, None)
+        return Response(status_code=204)
+
+    @app.post("/import/{session_id}/workspace/media-target")
+    async def import_workspace_media_target(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        source_path = form.get("source_path", "").strip()
+        target = form.get("target", "").strip()
+        item = next((media for media in _workspace_all_media(session) if str(media.path) == source_path), None)
+        if item is None:
+            raise HTTPException(status_code=400, detail="Unknown page")
+        allowed = {value for node in _workspace_tree(session) for value, _ in _workspace_media_targets_for_folder(session, str(node["path"]))}
+        if target not in allowed:
+            raise HTTPException(status_code=400, detail="Invalid target group")
+        origin = _workspace_origin_for_media(session, source_path)
+        if target == origin:
+            session.workspace_media_targets.pop(source_path, None)
+        else:
+            session.workspace_media_targets[source_path] = target
+        return Response(status_code=204)
+
+    @app.post("/import/{session_id}/workspace/media-targets")
+    async def import_workspace_media_targets(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        target = form.get("target", "").strip()
+        try:
+            source_paths = json.loads(form.get("source_paths", "[]"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid page selection") from exc
+        if not isinstance(source_paths, list) or not source_paths or any(not isinstance(value, str) for value in source_paths):
+            raise HTTPException(status_code=400, detail="Select at least one page")
+        if len(set(source_paths)) != len(source_paths):
+            raise HTTPException(status_code=400, detail="Duplicate pages in selection")
+
+        all_media = {str(media.path): media for media in _workspace_all_media(session)}
+        for source_path in source_paths:
+            if source_path not in all_media:
+                raise HTTPException(status_code=400, detail="Unknown page")
+            current = session.workspace_media_targets.get(source_path) or _workspace_origin_for_media(session, source_path)
+            if current is None:
+                raise HTTPException(status_code=400, detail="Could not determine page group")
+            allowed = {value for value, _ in _workspace_media_targets_for_folder(session, current)}
+            if target not in allowed:
+                raise HTTPException(status_code=400, detail="Pages can only be moved within their current issue")
+
+        for source_path in source_paths:
+            origin = _workspace_origin_for_media(session, source_path)
+            if target == origin:
+                session.workspace_media_targets.pop(source_path, None)
+            else:
+                session.workspace_media_targets[source_path] = target
+        return Response(status_code=204)
+
+    @app.post("/import/{session_id}/workspace/finalize", response_class=HTMLResponse)
+    async def import_workspace_finalize(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        # Save the root metadata from the final form as well, so a user can type
+        # and immediately continue without needing a blur/change event first.
+        session.workspace_author = form.get("author", session.workspace_author or session.author_default or "").strip()
+        session.workspace_series = form.get("series", session.workspace_series or session.series_default or session.plan.scan.content_root.name).strip()
+        session.workspace_series_complete = form.get("series_complete", session.workspace_series_complete).strip()
+        issue_metadata: dict[str, dict[str, object]] = {}
+        subseries_metadata: dict[str, dict[str, object]] = {}
+        issue_items = _workspace_sorted_review_items(session, ReviewRole.ISSUE) if session.plan.scan.is_series_candidate else [None]
+        subseries_items = _workspace_sorted_review_items(session, ReviewRole.SUBSERIES) if session.plan.scan.is_series_candidate else []
+        if session.plan.scan.is_series_candidate:
+            for index, item in enumerate(subseries_items, start=1):
+                key = _workspace_item_key(session, item)
+                meta = session.workspace_metadata.get(key, {})
+                # The staged model gets its title from ReviewItem.name.
+                title = meta.get("title", item.name).strip()
+                if title:
+                    item.name = title
+                subseries_metadata[str(item.relative_path)] = {"complete": meta.get("complete", ""), "sort_order": index}
+            for index, item in enumerate(issue_items, start=1):
+                key = _workspace_item_key(session, item)
+                meta = session.workspace_metadata.get(key, {})
+                issue_metadata[str(item.relative_path)] = {
+                    "issue_number": meta.get("issue_number", item.name),
+                    "title": meta.get("title", ""),
+                    "complete": meta.get("complete", ""),
+                    "sort_order": index,
+                }
+        else:
+            root_key = _workspace_source_relative(session.plan.scan, session.plan.scan.content_root)
+            meta = session.workspace_metadata.get(root_key, {})
+            issue_metadata["."] = {
+                "issue_number": meta.get("issue_number", ""),
+                "title": meta.get("title", ""),
+                "complete": meta.get("complete", ""),
+                "sort_order": 1,
+            }
+        # Reapply editable folder/group labels after any rescans that may have
+        # rebuilt the ReviewPlan while the workspace remained open.
+        for node in _workspace_tree(session):
+            path = str(node["path"])
+            if path.startswith("virtual:"):
+                continue
+            meta = session.workspace_metadata.get(path, {})
+            title = meta.get("title", "").strip()
+            item = node.get("item")
+            if title and item is not None and str(node["role"]) in {"Sub-Series", "Issue-Extras", "Series-Extras"}:
+                item.name = title
+
+        try:
+            staged = build_staged_import(
+                session.plan,
+                author=session.workspace_author or "",
+                series=session.workspace_series or "",
+                issue_metadata=issue_metadata,
+                subseries_metadata=subseries_metadata,
+                series_complete=_bool_form(session.workspace_series_complete),
+            )
+            # Add workspace-created groups, then apply page moves into either
+            # existing or virtual groups.
+            virtual_paths: dict[str, str] = {}
+            for group_id, group in session.workspace_virtual_groups.items():
+                owner_key = group["owner"]
+                owner_item = next((item for item in issue_items if item is not None and _workspace_item_key(session, item) == owner_key), None)
+                if owner_item is None and not session.plan.scan.is_series_candidate:
+                    staged_owner = "."
+                elif owner_item is not None:
+                    staged_owner = str(owner_item.relative_path)
+                else:
+                    raise StagingError(f"Could not resolve issue owner for extra group {group['name']}")
+                virtual_paths[f"virtual:{group_id}"] = create_staged_issue_extra(staged, staged_owner, group["name"])
+            tree = _workspace_tree(session)
+            real_target_paths: dict[str, tuple[str, str]] = {}
+            for node in tree:
+                path = str(node["path"])
+                if str(node["role"]) not in {"Issue", "Issue-Extras"} or path.startswith("virtual:"):
+                    continue
+                item = node.get("item")
+                if str(node["role"]) == "Issue":
+                    owner_key = str(item.relative_path) if item is not None else "."
+                    staged_issue = next((issue for issue in staged.issues if issue.source_key == owner_key), None)
+                    if staged_issue:
+                        primary = next((group for group in staged_issue.groups if group.role == ReviewRole.PRIMARY.value), None)
+                        if primary:
+                            real_target_paths[path] = (owner_key, primary.relative_path)
+                elif item is not None and getattr(item, "issue_path", None) is not None:
+                    owner_key = str(item.issue_path)
+                    staged_issue = next((issue for issue in staged.issues if issue.source_key == owner_key), None)
+                    if staged_issue:
+                        group = next((group for group in staged_issue.groups if group.relative_path == str(item.relative_path)), None)
+                        if group:
+                            real_target_paths[path] = (owner_key, group.relative_path)
+            for source_path, target in session.workspace_media_targets.items():
+                if target in virtual_paths:
+                    virtual_group = virtual_paths[target]
+                    group_info = session.workspace_virtual_groups[target.split(":", 1)[1]]
+                    owner_item = next((item for item in issue_items if item is not None and _workspace_item_key(session, item) == group_info["owner"]), None)
+                    owner_key = str(owner_item.relative_path) if owner_item is not None else "."
+                    move_staged_media(staged, owner_key, source_path, virtual_group)
+                elif target in real_target_paths:
+                    owner_key, group_path = real_target_paths[target]
+                    move_staged_media(staged, owner_key, source_path, group_path)
+            empty = [group.name for issue in staged.issues for group in issue.groups if not group.media]
+            if empty:
+                raise StagingError(
+                    "Empty content group" + ("s" if len(empty) != 1 else "") + ": " + ", ".join(empty) +
+                    ". Add pages to the group or remove it before continuing."
+                )
+            staging.mkdir(parents=True, exist_ok=True)
+            staging_path = staged.save(staging / f"{staged.staging_id}.json")
+            session.staged = staged
+            session.staging_path = staging_path
+        except (StagingError, ReviewError) as exc:
+            tree = _workspace_tree(session)
+            requested = form.get("selected", "")
+            selected = requested if any(str(node["path"]) == requested for node in tree) else str(tree[0]["path"])
+            selected_node = next(node for node in tree if str(node["path"]) == selected)
+            return templates.TemplateResponse(
+                request=request,
+                name="import_workspace.html",
+                context={
+                    "session_id": session_id, "plan": session.plan, "tree": tree, "selected": selected,
+                    "selected_node": selected_node, "selected_media": _workspace_media_for_folder(session, selected),
+                    "selected_metadata": _workspace_node_metadata(session, selected_node),
+                    "media_targets": _workspace_media_targets_for_folder(session, selected),
+                    "author_value": session.workspace_author or "", "series_value": session.workspace_series or "",
+                    "series_complete_value": session.workspace_series_complete, "errors": [str(exc)],
+                }, status_code=400,
+            )
+        return RedirectResponse(f"/import/{session_id}/confirm", status_code=303)
+
+    @app.post("/import/{session_id}/workspace/role")
+    async def import_workspace_role(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        folder_key = form.get("folder_path", "").strip()
+        role = form.get("role", "").strip()
+        if not folder_key or role not in {"sub-series", "issue", "issue-extras", "series-extras", "primary-pages", "container"}:
+            raise HTTPException(status_code=400, detail="Invalid workspace folder role")
+        candidate = (session.plan.scan.source / folder_key).resolve() if folder_key != "." else session.plan.scan.source.resolve()
+        try:
+            candidate.relative_to(session.plan.scan.source.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid workspace folder path") from exc
+        if not candidate.is_dir() or candidate.resolve() == session.plan.scan.content_root.resolve():
+            raise HTTPException(status_code=400, detail="The import root role is determined by the comic structure")
+
+        old_extra = set(session.extra_folder_overrides)
+        old_primary = set(session.primary_folder_overrides)
+        old_subseries = set(session.subseries_folder_overrides)
+        old_container = set(session.container_folder_overrides)
+        session.extra_folder_overrides.discard(folder_key)
+        session.primary_folder_overrides.discard(folder_key)
+        session.subseries_folder_overrides.discard(folder_key)
+        session.container_folder_overrides.discard(folder_key)
+        if role in {"issue-extras", "series-extras"}:
+            session.extra_folder_overrides.add(folder_key)
+        elif role == "sub-series":
+            session.subseries_folder_overrides.add(folder_key)
+        elif role in {"primary-pages", "container"}:
+            session.primary_folder_overrides.add(folder_key)
+            if role == "container":
+                session.container_folder_overrides.add(folder_key)
+        try:
+            _rescan_import_session(session)
+            mapped = _workspace_role_map(session.plan).get(folder_key)
+            if role == "series-extras" and mapped and mapped[1] is not None:
+                session.plan.set_role(mapped[1].relative_path, ReviewRole.SERIES_EXTRA)
+            elif role == "issue-extras" and mapped and mapped[1] is not None:
+                session.plan.set_role(mapped[1].relative_path, ReviewRole.ISSUE_EXTRA)
+            elif role == "issue":
+                if not mapped or mapped[0] != "Issue":
+                    raise ReviewError(
+                        "That folder cannot become an issue at its current level. "
+                        "If it is inside another issue, first make its parent a sub-series."
+                    )
+        except (FolderScanError, ReviewError, OSError) as exc:
+            session.extra_folder_overrides = old_extra
+            session.primary_folder_overrides = old_primary
+            session.subseries_folder_overrides = old_subseries
+            session.container_folder_overrides = old_container
+            _rescan_import_session(session)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(f"/import/{session_id}/review?folder={folder_key}", status_code=303)
+
+    @app.post("/import/{session_id}/workspace/folder-order")
+    async def import_workspace_folder_order(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        parent = form.get("parent", ".").strip() or "."
+        try:
+            ordered = json.loads(form.get("ordered_paths", "[]"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid folder ordering") from exc
+        if not isinstance(ordered, list) or not all(isinstance(item, str) for item in ordered):
+            raise HTTPException(status_code=400, detail="Invalid folder ordering")
+        tree = _workspace_tree(session)
+        siblings = {str(node["path"]) for node in tree if not node["is_root"] and (node["parent"] or ".") == parent}
+        if set(ordered) != siblings:
+            raise HTTPException(status_code=400, detail="Folder order must contain every sibling exactly once")
+        session.folder_order_overrides[parent] = ordered
+        return Response(status_code=204)
+
+    @app.post("/import/{session_id}/workspace/media-order")
+    async def import_workspace_media_order(request: Request, session_id: str):
+        session = _session_or_404(app, session_id)
+        form = await _form_data(request)
+        _touch_import_activity(app, session)
+        folder = form.get("folder_path", "").strip()
+        try:
+            ordered = json.loads(form.get("ordered_paths", "[]"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid page ordering") from exc
+        if not isinstance(ordered, list) or not all(isinstance(item, str) for item in ordered):
+            raise HTTPException(status_code=400, detail="Invalid page ordering")
+        current = _workspace_media_for_folder(session, folder)
+        if set(ordered) != {str(item.path) for item in current} or len(ordered) != len(current):
+            raise HTTPException(status_code=400, detail="Page order must contain every displayed page exactly once")
+        _workspace_reorder_media(session, ordered)
+        return Response(status_code=204)
 
     @app.post("/import/{session_id}/review/mark-extra", response_class=HTMLResponse)
     async def import_review_mark_extra(request: Request, session_id: str):
@@ -1312,13 +2028,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Folder is not an available flattened folder")
         session.extra_folder_overrides.add(relative_path)
         try:
-            scan = scan_folder(
-                session.plan.scan.source,
-                extra_folders=sorted(session.extra_folder_overrides),
-                subseries_folders=sorted(session.subseries_folder_overrides),
-                pdf_cache_root=session.pdf_cache_root,
-            )
-            session.plan = build_review_plan(scan)
+            _rescan_import_session(session)
         except (FolderScanError, OSError) as exc:
             session.extra_folder_overrides.discard(relative_path)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1341,13 +2051,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="Sub-series folder not found")
         session.subseries_folder_overrides.add(relative_path)
         try:
-            scan = scan_folder(
-                session.plan.scan.source,
-                extra_folders=sorted(session.extra_folder_overrides),
-                subseries_folders=sorted(session.subseries_folder_overrides),
-                pdf_cache_root=session.pdf_cache_root,
-            )
-            session.plan = build_review_plan(scan)
+            _rescan_import_session(session)
         except (FolderScanError, OSError) as exc:
             session.subseries_folder_overrides.discard(relative_path)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1395,8 +2099,8 @@ def create_app(
         session = _session_or_404(app, session_id)
         _touch_import_activity(app, session)
         if session.plan.scan.is_series_candidate:
-            issue_items = [item for item in session.plan.items if item.role is ReviewRole.ISSUE]
-            subseries_items = [item for item in session.plan.items if item.role is ReviewRole.SUBSERIES]
+            issue_items = _workspace_sorted_review_items(session, ReviewRole.ISSUE)
+            subseries_items = _workspace_sorted_review_items(session, ReviewRole.SUBSERIES)
         else:
             issue_items = [None]
             subseries_items = []
@@ -1426,8 +2130,8 @@ def create_app(
         issue_metadata: dict[str, dict[str, object]] = {}
         subseries_metadata: dict[str, dict[str, object]] = {}
         if session.plan.scan.is_series_candidate:
-            issue_items = [item for item in session.plan.items if item.role is ReviewRole.ISSUE]
-            subseries_items = [item for item in session.plan.items if item.role is ReviewRole.SUBSERIES]
+            issue_items = _workspace_sorted_review_items(session, ReviewRole.ISSUE)
+            subseries_items = _workspace_sorted_review_items(session, ReviewRole.SUBSERIES)
             for index, item in enumerate(subseries_items):
                 subseries_metadata[str(item.relative_path)] = {
                     "complete": form.get(f"subseries_complete_{index}", ""),

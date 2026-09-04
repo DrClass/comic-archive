@@ -542,3 +542,46 @@ page, and extra totals. Parent modified dates also reflect descendant changes. S
 pages show child-series cards before direct issues and breadcrumbs reflect the nested
 path. Existing series can be moved under another series or returned to top level from
 **Edit series**; cycle creation is rejected.
+
+## Milestone 28: tree-based import workspace
+
+The import review step now opens a file-explorer-style workspace built from the uploaded comic's real folder tree. Folder files stay collapsed in the tree; selecting a folder shows its scanned/imported pages in a right-hand pane.
+
+Workspace controls:
+
+- Every media-bearing folder is visible before staging, including folders the scanner would otherwise fold into primary pages.
+- Folders display an import role: Series, Sub-Series, Issue, Issue-Extras, Series-Extras, Primary Pages, or Container.
+- Non-root roles can be changed directly in the tree. Role changes rescan the untouched temporary source rather than modifying files.
+- Sibling folders can be dragged up/down. That order becomes the default sub-series/issue order on the metadata step.
+- Pages in the selected folder/group can be dragged to set reading order; the order is carried into staging and commit.
+- PDF imports continue to show their rendered PNG pages in the page-order pane.
+- Existing review endpoints remain available internally for compatibility, while `/import/<session>/review` now presents the workspace.
+
+Current workspace scope is intentionally conservative: folder drag-and-drop reorders siblings but does not yet reparent folders, and moving pages between content groups still uses the existing organizer step. Those are natural follow-ups as the workspace absorbs more of the importer flow.
+
+## Milestone 29 — single-page import workspace
+
+Importing is now centered on one tree-based workspace instead of separate Review, Metadata, and Organize pages.
+
+- Workspace folder ordering now uses the importer's natural numeric sort, so `1, 2, 3, 10, 11` displays correctly instead of `1, 10, 11, 2, 3`.
+- Author, series title, and series completeness live at the top of the workspace.
+- Selecting an Issue exposes issue label/title/completeness in the right pane.
+- Selecting a Sub-Series exposes its editable title and completeness.
+- Selecting an Issue-Extras or Series-Extras folder exposes its editable group name.
+- Folder drag order remains the source of issue/sub-series ordering; the old numeric Order fields are no longer needed in the normal workflow.
+- Issue extra groups can be created directly from an Issue in the workspace. Workspace-created groups appear in the tree and can be renamed or removed before import.
+- Pages can be reassigned between the main comic and issue-extra groups from the selected-folder pane, while drag-and-drop continues to set reading order.
+- The workspace final action validates structure, metadata, empty groups, and page assignments, then creates the staging record and goes directly to confirmation.
+- The final button saves the currently visible metadata before validation, so users do not need to remember a separate save action first.
+- Existing legacy metadata/organizer endpoints remain in the code for compatibility, but the standard import UI no longer routes through them.
+
+## Milestone 30 — autosave and drag-to-group workspace
+
+- Workspace metadata saves automatically after edits; explicit metadata save buttons are no longer required.
+- Text inputs debounce saves; selects/blur save immediately, with visible Saving/Saved/error status.
+- Pending metadata is flushed before folder navigation, group creation/removal, drag moves, and final validation.
+- The narrow per-page destination dropdown has been removed from the workspace.
+- Pages can be selected by click, Ctrl/Cmd-click, or Shift-click.
+- A selected page set can be dragged from the right-hand page list onto compatible issue/main or issue-extra folders in the left tree.
+- Multi-page moves are validated server-side and cannot cross into unrelated issues.
+- Existing single-page drag sorting remains available.

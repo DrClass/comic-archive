@@ -1,0 +1,425 @@
+{% extends "base.html" %}
+{% block title %}Import workspace - Comic Archive{% endblock %}
+{% block content %}
+<h1>Import workspace</h1>
+<p><strong>Source:</strong> {{ plan.scan.source }}</p>
+<p class="muted">Use this page to define the comic structure, metadata, page order, and extras before import. Source files are never moved or modified.</p>
+{% if errors %}<div class="error">{% for error in errors %}{{ error }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>{% endif %}
+
+<section class="panel workspace-master-metadata">
+  <h2>Comic metadata</h2>
+  <form id="workspace-master-form" class="workspace-master-grid">
+    <input type="hidden" name="folder_path" value="{{ tree[0].path }}">
+    <div class="form-row"><label for="ws-author">Author</label><input id="ws-author" name="author" type="text" required value="{{ author_value }}"></div>
+    <div class="form-row"><label for="ws-series">Series title</label><input id="ws-series" name="series" type="text" required value="{{ series_value }}"></div>
+    <div class="form-row"><label for="ws-series-complete">Series completeness</label><select id="ws-series-complete" name="series_complete"><option value="" {% if not series_complete_value %}selected{% endif %}>Unknown</option><option value="yes" {% if series_complete_value == 'yes' %}selected{% endif %}>Complete</option><option value="no" {% if series_complete_value == 'no' %}selected{% endif %}>Incomplete</option></select></div>
+    <div class="form-row workspace-save-row"><span id="master-save-status" class="muted">Changes save automatically</span></div>
+  </form>
+</section>
+
+<div class="import-workspace">
+  <section class="workspace-tree-panel panel">
+    <div class="workspace-panel-heading">
+      <h2>Comic structure</h2>
+      <span class="muted">Files collapsed</span>
+    </div>
+    <div id="workspace-tree" class="workspace-tree">
+      {% for node in tree %}
+      <div class="workspace-node{% if node.path == selected %} selected{% endif %}{% if node.virtual %} virtual{% endif %}"
+           data-path="{{ node.path }}" data-parent="{{ node.parent or '.' }}" data-depth="{{ node.depth }}"
+           data-media-target="{% if node.path in media_target_paths %}true{% else %}false{% endif %}"
+           {% if not node.is_root and not node.virtual %}draggable="true"{% endif %}>
+        <span class="workspace-drag" title="Drag to reorder">{% if node.is_root or node.virtual %}&nbsp;{% else %}⋮⋮{% endif %}</span>
+        <a class="workspace-folder" href="/import/{{ session_id }}/review?folder={{ node.path|urlencode }}" style="padding-left: {{ node.depth * 1.15 }}rem">
+          <span class="workspace-caret">{% if node.child_count %}▾{% else %}•{% endif %}</span>
+          <strong>{{ node.name }}/</strong>
+          {% if node.direct_files %}<span class="muted">{{ node.direct_files }} file{% if node.direct_files != 1 %}s{% endif %}</span>{% endif %}
+        </a>
+        {% if node.is_root %}
+          <span class="workspace-role fixed">{{ node.role }}</span>
+        {% elif node.virtual %}
+          <span class="workspace-role fixed">Issue-Extras</span>
+        {% else %}
+          <form method="post" action="/import/{{ session_id }}/workspace/role" class="workspace-role-form">
+            <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+            <input type="hidden" name="folder_path" value="{{ node.path }}">
+            <select name="role" aria-label="Role for {{ node.name }}" onchange="this.form.submit()">
+              <option value="issue" {% if node.role == 'Issue' %}selected{% endif %}>Issue</option>
+              <option value="sub-series" {% if node.role == 'Sub-Series' %}selected{% endif %}>Sub-Series</option>
+              <option value="issue-extras" {% if node.role == 'Issue-Extras' %}selected{% endif %}>Issue-Extras</option>
+              <option value="series-extras" {% if node.role == 'Series-Extras' %}selected{% endif %}>Series-Extras</option>
+              <option value="primary-pages" {% if node.role == 'Primary Pages' %}selected{% endif %}>Primary Pages</option>
+              <option value="container" {% if node.role == 'Container' %}selected{% endif %}>Container</option>
+            </select>
+          </form>
+        {% endif %}
+        {% if node.role == 'Issue' and not node.is_root %}
+        <div hidden><form method="post" action="/import/{{ session_id }}/review/mark-subseries"><input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}"><button type="submit" name="folder_path" value="{{ node.path }}">Make sub-series</button></form></div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="workspace-files-panel panel">
+    <div class="workspace-panel-heading">
+      <div>
+        <h2>{{ selected_node.name }}/</h2>
+        <div class="muted">{{ selected_node.role }} · {{ selected_media|length }} page{% if selected_media|length != 1 %}s{% endif %} currently assigned</div>
+      </div>
+    </div>
+
+    {% if selected_node.role in ['Issue', 'Sub-Series', 'Issue-Extras', 'Series-Extras'] %}
+    <form id="workspace-node-form" class="workspace-node-metadata">
+      <input type="hidden" name="folder_path" value="{{ selected }}">
+      {% if selected_node.is_root %}
+        <input type="hidden" name="author" value="{{ author_value }}">
+        <input type="hidden" name="series" value="{{ series_value }}">
+        <input type="hidden" name="series_complete" value="{{ series_complete_value }}">
+      {% endif %}
+      {% if selected_node.role == 'Issue' %}
+        <div class="form-row"><label>Issue number/label</label><input name="issue_number" type="text" value="{{ selected_metadata.issue_number or '' }}"></div>
+        <div class="form-row"><label>Issue title</label><input name="title" type="text" value="{{ selected_metadata.title or '' }}"></div>
+        <div class="form-row"><label>Completeness</label><select name="{% if selected_node.is_root %}issue_complete{% else %}complete{% endif %}"><option value="" {% if not selected_metadata.complete %}selected{% endif %}>Unknown</option><option value="yes" {% if selected_metadata.complete == 'yes' %}selected{% endif %}>Complete</option><option value="no" {% if selected_metadata.complete == 'no' %}selected{% endif %}>Incomplete</option></select></div>
+      {% elif selected_node.role == 'Sub-Series' %}
+        <div class="form-row"><label>Sub-series title</label><input name="title" type="text" required value="{{ selected_metadata.title or selected_node.name }}"></div>
+        <div class="form-row"><label>Completeness</label><select name="complete"><option value="" {% if not selected_metadata.complete %}selected{% endif %}>Unknown</option><option value="yes" {% if selected_metadata.complete == 'yes' %}selected{% endif %}>Complete</option><option value="no" {% if selected_metadata.complete == 'no' %}selected{% endif %}>Incomplete</option></select></div>
+      {% else %}
+        <div class="form-row"><label>Group name</label><input name="title" type="text" required value="{{ selected_metadata.title or selected_node.name }}"></div>
+      {% endif %}
+      <div class="form-row workspace-save-row"><span id="node-save-status" class="muted">Changes save automatically</span></div>
+    </form>
+    {% endif %}
+
+    {% if selected_node.role == 'Issue' %}
+    <div class="inline-create workspace-create-group">
+      <label for="new-extra-name">Create issue extra group</label>
+      <div class="inline-controls">
+        <input id="new-extra-name" type="text" placeholder="e.g. Textless, Covers, Bonus">
+        <button id="create-extra-button" type="button">Create group</button>
+      </div>
+    </div>
+    {% elif selected_node.virtual %}
+    <p><button id="remove-extra-button" type="button">Remove this empty/custom group</button></p>
+    {% endif %}
+
+    {% if selected_media %}
+      <p class="muted">Drag pages to change reading order. Click a page to select it; Ctrl/Cmd-click selects multiple pages, then drag the selection onto the main issue or an extras folder in the tree.</p>
+      <div id="workspace-media" class="workspace-media-list" data-folder="{{ selected }}">
+      {% for media in selected_media %}
+        <div class="workspace-media-row" draggable="true" data-source="{{ media.path }}">
+          <span class="workspace-drag">⋮⋮</span>
+          <span class="workspace-page-number">{{ loop.index }}</span>
+          <span class="workspace-media-name">{{ media.relative_path }}</span>
+          <span class="muted workspace-media-kind">{{ media.media_kind.value|upper }}</span>
+        </div>
+      {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">No pages are currently assigned directly to this folder.</p>
+    {% endif %}
+  </section>
+</div>
+
+<section class="panel workspace-next">
+  <h2>Validate and continue</h2>
+  <p class="muted">This creates the staging record directly from the workspace. Empty groups or invalid structure will be reported here instead of sending you to separate metadata and organizer pages.</p>
+  <form method="post" action="/import/{{ session_id }}/workspace/finalize" id="workspace-finalize-form">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <input type="hidden" name="selected" value="{{ selected }}">
+    <input type="hidden" id="final-author" name="author" value="{{ author_value }}">
+    <input type="hidden" id="final-series" name="series" value="{{ series_value }}">
+    <input type="hidden" id="final-series-complete" name="series_complete" value="{{ series_complete_value }}">
+    <button type="submit">Validate and continue to confirmation</button>
+  </form>
+</section>
+
+<script>
+(() => {
+  const csrf = {{ request.session.get('csrf_token', '')|tojson }};
+  const sessionId = {{ session_id|tojson }};
+  const selected = {{ selected|tojson }};
+
+  async function post(url, values) {
+    const body = new URLSearchParams({csrf_token: csrf, ...values});
+    const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body});
+    if (!response.ok) {
+      let message = 'Could not save change.';
+      try { const data = await response.json(); message = data.detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    return response;
+  }
+
+  function formValues(form) { return Object.fromEntries(new FormData(form).entries()); }
+  function setStatus(el, text, error=false) {
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('error-text', error);
+  }
+
+  const master = document.getElementById('workspace-master-form');
+  const nodeForm = document.getElementById('workspace-node-form');
+  const masterStatus = document.getElementById('master-save-status');
+  const nodeStatus = document.getElementById('node-save-status');
+  let masterTimer = null;
+  let nodeTimer = null;
+  let masterPending = false;
+  let nodePending = false;
+
+  async function saveMaster() {
+    if (!master || !masterPending) return;
+    if (!master.checkValidity()) { setStatus(masterStatus, 'Complete required fields', true); return; }
+    masterPending = false;
+    setStatus(masterStatus, 'Saving…');
+    try {
+      await post(`/import/${sessionId}/workspace/metadata`, formValues(master));
+      document.getElementById('final-author').value = master.author.value;
+      document.getElementById('final-series').value = master.series.value;
+      document.getElementById('final-series-complete').value = master.series_complete.value;
+      setStatus(masterStatus, 'Saved');
+    } catch (error) { masterPending = true; setStatus(masterStatus, error.message, true); throw error; }
+  }
+
+  async function saveNode() {
+    if (!nodeForm || !nodePending) return;
+    if (!nodeForm.checkValidity()) { setStatus(nodeStatus, 'Complete required fields', true); return; }
+    nodePending = false;
+    setStatus(nodeStatus, 'Saving…');
+    const values = formValues(nodeForm);
+    if (master && {{ selected_node.is_root|tojson }}) {
+      values.author = master.author.value;
+      values.series = master.series.value;
+      values.series_complete = master.series_complete.value;
+    }
+    try {
+      await post(`/import/${sessionId}/workspace/metadata`, values);
+      setStatus(nodeStatus, 'Saved');
+    } catch (error) { nodePending = true; setStatus(nodeStatus, error.message, true); throw error; }
+  }
+
+  function scheduleAutosave(form, which) {
+    if (!form) return;
+    const mark = event => {
+      const isMaster = which === 'master';
+      if (isMaster) masterPending = true; else nodePending = true;
+      const status = isMaster ? masterStatus : nodeStatus;
+      setStatus(status, 'Unsaved changes');
+      const immediate = event.type === 'change' || event.type === 'blur';
+      if (isMaster) {
+        clearTimeout(masterTimer);
+        masterTimer = setTimeout(() => saveMaster().catch(() => {}), immediate ? 0 : 550);
+      } else {
+        clearTimeout(nodeTimer);
+        nodeTimer = setTimeout(() => saveNode().catch(() => {}), immediate ? 0 : 550);
+      }
+    };
+    form.addEventListener('input', mark);
+    form.addEventListener('change', mark);
+    form.addEventListener('blur', mark, true);
+    form.addEventListener('submit', event => { event.preventDefault(); (which === 'master' ? saveMaster() : saveNode()).catch(() => {}); });
+  }
+  scheduleAutosave(master, 'master');
+  scheduleAutosave(nodeForm, 'node');
+
+  async function flushMetadata() {
+    clearTimeout(masterTimer); clearTimeout(nodeTimer);
+    if (masterPending && master && !master.checkValidity()) {
+      master.reportValidity();
+      throw new Error('Complete required comic metadata fields.');
+    }
+    if (nodePending && nodeForm && !nodeForm.checkValidity()) {
+      nodeForm.reportValidity();
+      throw new Error('Complete required folder metadata fields.');
+    }
+    await saveMaster();
+    await saveNode();
+  }
+
+  const createButton = document.getElementById('create-extra-button');
+  if (createButton) {
+    createButton.addEventListener('click', async () => {
+      const input = document.getElementById('new-extra-name');
+      const name = input.value.trim();
+      if (!name) return;
+      try {
+        await flushMetadata();
+        const response = await post(`/import/${sessionId}/workspace/create-group`, {owner: selected, name});
+        const data = await response.json();
+        location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(data.group_path)}`;
+      } catch (error) { alert(error.message); }
+    });
+  }
+
+  const removeButton = document.getElementById('remove-extra-button');
+  if (removeButton) {
+    removeButton.addEventListener('click', async () => {
+      try {
+        await flushMetadata();
+        await post(`/import/${sessionId}/workspace/remove-group`, {folder_path: selected});
+        location.href = `/import/${sessionId}/review`;
+      } catch (error) { alert(error.message); }
+    });
+  }
+
+  let draggedNode = null;
+  let draggedMedia = null;
+  const selectedSources = new Set();
+  let lastSelectedRow = null;
+  const tree = document.getElementById('workspace-tree');
+  const media = document.getElementById('workspace-media');
+
+  function mediaRows() { return media ? [...media.querySelectorAll('.workspace-media-row')] : []; }
+  function paintSelection() {
+    for (const row of mediaRows()) row.classList.toggle('selected', selectedSources.has(row.dataset.source));
+  }
+  function selectOnly(row) {
+    selectedSources.clear(); selectedSources.add(row.dataset.source); lastSelectedRow = row; paintSelection();
+  }
+
+  if (media) {
+    media.addEventListener('click', event => {
+      const row = event.target.closest('.workspace-media-row');
+      if (!row) return;
+      const rows = mediaRows();
+      if (event.shiftKey && lastSelectedRow) {
+        const a = rows.indexOf(lastSelectedRow), b = rows.indexOf(row);
+        if (!event.ctrlKey && !event.metaKey) selectedSources.clear();
+        for (const item of rows.slice(Math.min(a,b), Math.max(a,b)+1)) selectedSources.add(item.dataset.source);
+      } else if (event.ctrlKey || event.metaKey) {
+        if (selectedSources.has(row.dataset.source)) selectedSources.delete(row.dataset.source); else selectedSources.add(row.dataset.source);
+        lastSelectedRow = row;
+      } else selectOnly(row);
+      paintSelection();
+    });
+    media.addEventListener('dragstart', event => {
+      const row = event.target.closest('.workspace-media-row');
+      if (!row) return;
+      if (!selectedSources.has(row.dataset.source)) selectOnly(row);
+      draggedMedia = row;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', [...selectedSources].join('\n'));
+      for (const item of mediaRows()) if (selectedSources.has(item.dataset.source)) item.classList.add('dragging');
+      if (tree) tree.classList.add('media-drag-active');
+    });
+    media.addEventListener('dragend', () => {
+      for (const row of mediaRows()) row.classList.remove('dragging');
+      if (tree) {
+        tree.classList.remove('media-drag-active');
+        for (const row of tree.querySelectorAll('.media-drop-hover')) row.classList.remove('media-drop-hover');
+      }
+      draggedMedia = null;
+    });
+    media.addEventListener('dragover', event => {
+      if (draggedMedia && event.target.closest('.workspace-media-row')) event.preventDefault();
+    });
+    media.addEventListener('drop', async event => {
+      const target = event.target.closest('.workspace-media-row');
+      if (!draggedMedia || !target || selectedSources.size > 1 || target === draggedMedia) return;
+      event.preventDefault();
+      const rect = target.getBoundingClientRect();
+      media.insertBefore(draggedMedia, event.clientY < rect.top + rect.height / 2 ? target : target.nextSibling);
+      [...media.querySelectorAll('.workspace-page-number')].forEach((el, index) => el.textContent = String(index + 1));
+      const ordered = mediaRows().map(row => row.dataset.source);
+      try { await post(`/import/${sessionId}/workspace/media-order`, {folder_path: media.dataset.folder, ordered_paths: JSON.stringify(ordered)}); }
+      catch (error) { alert(error.message); location.reload(); }
+    });
+  }
+
+  if (tree) {
+    for (const link of tree.querySelectorAll('.workspace-folder')) {
+      link.addEventListener('click', async event => {
+        if (!masterPending && !nodePending) return;
+        event.preventDefault();
+        try { await flushMetadata(); location.href = link.href; } catch (_) {}
+      });
+    }
+    tree.addEventListener('dragstart', event => {
+      if (draggedMedia) return;
+      const row = event.target.closest('.workspace-node');
+      if (!row || !row.draggable) return;
+      draggedNode = row;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', row.dataset.path);
+      row.classList.add('dragging');
+    });
+    tree.addEventListener('dragend', () => {
+      if (draggedNode) draggedNode.classList.remove('dragging');
+      draggedNode = null;
+    });
+    tree.addEventListener('dragover', event => {
+      const target = event.target.closest('.workspace-node');
+      if (draggedMedia) {
+        if (!target || target.dataset.mediaTarget !== 'true') return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        for (const row of tree.querySelectorAll('.media-drop-hover')) row.classList.remove('media-drop-hover');
+        target.classList.add('media-drop-hover');
+        return;
+      }
+      if (!draggedNode || !target || target === draggedNode || target.dataset.parent !== draggedNode.dataset.parent || target.classList.contains('virtual')) return;
+      event.preventDefault();
+    });
+    tree.addEventListener('dragleave', event => {
+      const target = event.target.closest('.workspace-node');
+      if (target && !target.contains(event.relatedTarget)) target.classList.remove('media-drop-hover');
+    });
+    tree.addEventListener('drop', async event => {
+      const target = event.target.closest('.workspace-node');
+      if (draggedMedia) {
+        if (!target || target.dataset.mediaTarget !== 'true') return;
+        event.preventDefault();
+        target.classList.remove('media-drop-hover');
+        try {
+          await flushMetadata();
+          await post(`/import/${sessionId}/workspace/media-targets`, {source_paths: JSON.stringify([...selectedSources]), target: target.dataset.path});
+          location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(target.dataset.path)}`;
+        } catch (error) { alert(error.message); }
+        return;
+      }
+      if (!draggedNode || !target || target === draggedNode || target.dataset.parent !== draggedNode.dataset.parent || target.classList.contains('virtual')) return;
+      event.preventDefault();
+      const parent = draggedNode.dataset.parent;
+      const rows = [...tree.querySelectorAll('.workspace-node')];
+      const sourceIndex = rows.indexOf(draggedNode);
+      const sourceDepth = Number(draggedNode.dataset.depth);
+      let endIndex = sourceIndex + 1;
+      while (endIndex < rows.length && Number(rows[endIndex].dataset.depth) > sourceDepth) endIndex++;
+      const block = rows.slice(sourceIndex, endIndex);
+      const targetRect = target.getBoundingClientRect();
+      const insertBefore = event.clientY < targetRect.top + targetRect.height / 2;
+      const reference = insertBefore ? target : (() => {
+        const targetIndex = rows.indexOf(target), targetDepth = Number(target.dataset.depth);
+        let after = targetIndex + 1;
+        while (after < rows.length && Number(rows[after].dataset.depth) > targetDepth) after++;
+        return rows[after] || null;
+      })();
+      for (const row of block) tree.insertBefore(row, reference);
+      const ordered = [...tree.querySelectorAll(`.workspace-node[data-parent="${CSS.escape(parent)}"]`)]
+        .filter(row => !row.classList.contains('virtual')).map(row => row.dataset.path);
+      try { await post(`/import/${sessionId}/workspace/folder-order`, {parent, ordered_paths: JSON.stringify(ordered)}); }
+      catch (error) { alert(error.message); location.reload(); }
+    });
+  }
+
+  const finalize = document.getElementById('workspace-finalize-form');
+  if (finalize && master) {
+    let finalizing = false;
+    finalize.addEventListener('submit', async event => {
+      if (finalizing) return;
+      event.preventDefault();
+      try {
+        masterPending = true;
+        if (nodeForm) nodePending = true;
+        await flushMetadata();
+        document.getElementById('final-author').value = master.author.value;
+        document.getElementById('final-series').value = master.series.value;
+        document.getElementById('final-series-complete').value = master.series_complete.value;
+        finalizing = true;
+        finalize.submit();
+      } catch (error) { alert(error.message); }
+    });
+  }
+})();
+</script>
+{% endblock %}
