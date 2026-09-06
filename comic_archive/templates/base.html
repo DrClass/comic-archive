@@ -218,6 +218,12 @@
     .workspace-media-name { overflow-wrap: anywhere; }
     .workspace-next { margin-top: 1rem; }
 
+
+    .import-processing { margin-top: .8rem; display: flex; align-items: center; gap: .75rem; color: #666; }
+    .import-processing[hidden] { display: none; }
+    .import-processing progress { width: min(28rem, 70vw); height: 1rem; }
+    form.is-processing button[type="submit"] { opacity: .65; cursor: wait; }
+
     @media (max-width: 520px) {
       header { flex-wrap: wrap; }
       .header-search { order: 3; flex-basis: 100%; max-width: none; }
@@ -266,6 +272,39 @@
   {% endif %}
 </header>
 <main>{% block content %}{% endblock %}</main>
+
+<script>
+(() => {
+  document.querySelectorAll('form.import-processing-form').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      if (form.dataset.submitting === 'yes') {
+        event.preventDefault();
+        return;
+      }
+      form.dataset.submitting = 'yes';
+      form.classList.add('is-processing');
+      form.querySelectorAll('button[type="submit"], input[type="submit"]').forEach((button) => {
+        button.disabled = true;
+      });
+      const progress = form.querySelector('.import-processing');
+      if (progress) progress.hidden = false;
+    });
+  });
+
+  // Browsers may restore a page from the back/forward cache with disabled controls.
+  window.addEventListener('pageshow', () => {
+    document.querySelectorAll('form.import-processing-form').forEach((form) => {
+      form.dataset.submitting = '';
+      form.classList.remove('is-processing');
+      form.querySelectorAll('button[type="submit"], input[type="submit"]').forEach((button) => {
+        button.disabled = false;
+      });
+      const progress = form.querySelector('.import-processing');
+      if (progress) progress.hidden = true;
+    });
+  });
+})();
+</script>
 
 <script>
 (() => {

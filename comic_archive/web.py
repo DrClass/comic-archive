@@ -865,6 +865,50 @@ def _delete_import_session_state(app: FastAPI, session_id: str) -> None:
         pass
 
 
+def _completed_import_path(app: FastAPI, session_id: str) -> Path:
+    return _session_state_path(app, "completed", session_id)
+
+
+def _save_completed_import(app: FastAPI, session_id: str, payload: dict) -> None:
+    data = dict(payload)
+    data["last_activity"] = time.time()
+    _atomic_json_write(_completed_import_path(app, session_id), data)
+
+
+def _load_completed_import(app: FastAPI, session_id: str) -> dict | None:
+    path = _completed_import_path(app, session_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - float(data.get("last_activity", 0)) >= UPLOAD_INACTIVITY_SECONDS:
+            path.unlink(missing_ok=True)
+            return None
+        return data
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _existing_commit_result(database: Path, staged: StagedImport) -> dict | None:
+    try:
+        with sqlite3.connect(database) as db:
+            row = db.execute(
+                "SELECT id, author_id, series_id FROM imports WHERE staging_id = ?",
+                (staged.staging_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "import_id": row[0],
+            "author_id": row[1],
+            "series_id": row[2],
+            "copied_files": sum(len(group.media) for issue in staged.issues for group in issue.groups)
+                + sum(len(group.media) for group in staged.series_extras),
+        }
+    except sqlite3.Error:
+        return None
+
+
 def _persist_bulk_session(app: FastAPI, bulk_id: str, bulk: BulkArtistSession) -> None:
     _atomic_json_write(_session_state_path(app, "bulk", bulk_id), {
         "version": 1, "source": str(bulk.source), "author": bulk.author,
@@ -1856,6 +1900,8 @@ def create_app(
 
     @app.get("/import/{session_id}/review", response_class=HTMLResponse)
     def import_review(request: Request, session_id: str):
+        if _load_completed_import(app, session_id) is not None:
+            return RedirectResponse(f"/import/{session_id}/done", status_code=303)
         session = _session_or_404(app, session_id)
         _touch_import_activity(app, session)
         tree = _workspace_tree(session)
@@ -2343,6 +2389,8 @@ def create_app(
 
     @app.get("/import/{session_id}/metadata", response_class=HTMLResponse)
     def import_metadata(request: Request, session_id: str):
+        if _load_completed_import(app, session_id) is not None:
+            return RedirectResponse(f"/import/{session_id}/done", status_code=303)
         session = _session_or_404(app, session_id)
         _touch_import_activity(app, session)
         if session.plan.scan.is_series_candidate:
@@ -2432,6 +2480,8 @@ def create_app(
 
     @app.get("/import/{session_id}/organize", response_class=HTMLResponse)
     def import_organize(request: Request, session_id: str):
+        if _load_completed_import(app, session_id) is not None:
+            return RedirectResponse(f"/import/{session_id}/done", status_code=303)
         session = _session_or_404(app, session_id)
         _touch_import_activity(app, session)
         if session.staged is None:
@@ -2528,6 +2578,8 @@ def create_app(
 
     @app.get("/import/{session_id}/confirm", response_class=HTMLResponse)
     def import_confirm(request: Request, session_id: str):
+        if _load_completed_import(app, session_id) is not None:
+            return RedirectResponse(f"/import/{session_id}/done", status_code=303)
         session = _session_or_404(app, session_id)
         _touch_import_activity(app, session)
         if session.staged is None:
@@ -2573,8 +2625,33 @@ def create_app(
         _delete_bulk_session_state(app, bulk_id)
         return RedirectResponse(f"/import/bulk/{bulk_id}/done", status_code=303)
 
+    @app.get("/import/{session_id}/done", response_class=HTMLResponse)
+    def import_done(request: Request, session_id: str):
+        receipt = _load_completed_import(app, session_id)
+        if receipt is None:
+            session = _session_or_404(app, session_id)
+            if session.staged is None:
+                return RedirectResponse(f"/import/{session_id}/review", status_code=303)
+            return RedirectResponse(f"/import/{session_id}/confirm", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="import_done.html",
+            context={
+                "result": type("CompletedResult", (), receipt["result"])(),
+                "staged": type("CompletedStaged", (), {"author": receipt["author"], "series": receipt["series"]})(),
+                "next_url": receipt.get("next_url"),
+                "bulk_progress": receipt.get("bulk_progress"),
+                "bulk_error": receipt.get("bulk_error"),
+            },
+        )
+
     @app.post("/import/{session_id}/commit", response_class=HTMLResponse)
     async def import_commit(request: Request, session_id: str):
+        # A completed receipt makes this endpoint idempotent. Double-clicks, refreshes,
+        # and browser POST replays all resolve to the already-completed result.
+        if _load_completed_import(app, session_id) is not None:
+            return RedirectResponse(f"/import/{session_id}/done", status_code=303)
+
         session = _session_or_404(app, session_id)
         if session.staged is None:
             return RedirectResponse(f"/import/{session_id}/metadata", status_code=303)
@@ -2588,59 +2665,62 @@ def create_app(
                 database_path=database,
                 allow_duplicate=allow_duplicate,
             )
+            result_payload = {
+                "import_id": result.import_id, "author_id": result.author_id,
+                "series_id": result.series_id, "copied_files": result.copied_files,
+            }
         except CommitError as exc:
-            message = str(exc)
-            duplicate = "Possible duplicate import detected" in message
-            return templates.TemplateResponse(
-                request=request,
-                name="import_confirm.html",
-                context={"session_id": session_id, "staged": session.staged, "error": message, "duplicate": duplicate, "is_bulk": bool(session.bulk_id)},
-                status_code=409 if duplicate else 400,
-            )
-        app.state.import_sessions.pop(session_id, None)
-        _delete_import_session_state(app, session_id)
-        _remove_staging_record(session)
+            # If a previous request actually committed but its response was lost, recover
+            # from the imports table instead of making the user restart the workflow.
+            existing = _existing_commit_result(database, session.staged)
+            if existing is not None and "already been committed" in str(exc):
+                result_payload = existing
+            else:
+                message = str(exc)
+                duplicate = "Possible duplicate import detected" in message
+                return templates.TemplateResponse(
+                    request=request,
+                    name="import_confirm.html",
+                    context={"session_id": session_id, "staged": session.staged, "error": message, "duplicate": duplicate, "is_bulk": bool(session.bulk_id)},
+                    status_code=409 if duplicate else 400,
+                )
+
+        receipt = {
+            "author": session.staged.author,
+            "series": session.staged.series,
+            "result": result_payload,
+            "next_url": None, "bulk_progress": None, "bulk_error": None,
+        }
+
         if session.bulk_id:
             bulk = _bulk_session_or_404(app, session.bulk_id)
-            bulk.imported_series.append((session.staged.series, result.series_id))
-            bulk.current_position += 1
+            if not any(series_id == result_payload["series_id"] for _, series_id in bulk.imported_series):
+                bulk.imported_series.append((session.staged.series, result_payload["series_id"]))
+                bulk.current_position += 1
             try:
                 next_session_id = _start_bulk_item(app, session.bulk_id)
             except (FolderScanError, OSError) as exc:
-                return templates.TemplateResponse(
-                    request=request,
-                    name="import_done.html",
-                    context={
-                        "result": result,
-                        "staged": session.staged,
-                        "bulk_error": str(exc),
-                        "next_url": None,
-                        "bulk_progress": f"{bulk.current_position} of {len(bulk.selected)}",
-                    },
-                    status_code=400,
-                )
+                receipt["bulk_error"] = str(exc)
+                receipt["bulk_progress"] = f"{bulk.current_position} of {len(bulk.selected)}"
+                next_session_id = None
             if next_session_id is not None:
-                return templates.TemplateResponse(
-                    request=request,
-                    name="import_done.html",
-                    context={
-                        "result": result,
-                        "staged": session.staged,
-                        "next_url": f"/import/{next_session_id}/review",
-                        "bulk_progress": f"{bulk.current_position} of {len(bulk.selected)}",
-                        "bulk_error": None,
-                    },
-                )
-            _cleanup_upload(bulk.upload_root)
-            bulk.upload_root = None
-            return RedirectResponse(f"/import/bulk/{session.bulk_id}/done", status_code=303)
+                receipt["next_url"] = f"/import/{next_session_id}/review"
+                receipt["bulk_progress"] = f"{bulk.current_position} of {len(bulk.selected)}"
+            elif bulk.current_position >= len(bulk.selected):
+                _cleanup_upload(bulk.upload_root)
+                bulk.upload_root = None
+                _delete_bulk_session_state(app, session.bulk_id)
+        else:
+            _cleanup_upload(session.upload_root)
 
-        _cleanup_upload(session.upload_root)
-        return templates.TemplateResponse(
-            request=request,
-            name="import_done.html",
-            context={"result": result, "staged": session.staged, "next_url": None, "bulk_progress": None, "bulk_error": None},
-        )
+        _save_completed_import(app, session_id, receipt)
+        app.state.import_sessions.pop(session_id, None)
+        _delete_import_session_state(app, session_id)
+        _remove_staging_record(session)
+
+        if session.bulk_id and receipt["next_url"] is None and receipt["bulk_error"] is None:
+            return RedirectResponse(f"/import/bulk/{session.bulk_id}/done", status_code=303)
+        return RedirectResponse(f"/import/{session_id}/done", status_code=303)
 
     @app.get("/maintenance", response_class=HTMLResponse)
     def maintenance_page(request: Request):

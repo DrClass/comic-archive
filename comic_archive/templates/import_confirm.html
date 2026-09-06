@@ -8,10 +8,14 @@
 {% for issue in staged.issues %}<li>Issue {{ issue.issue_number or issue.title or '(unlabeled)' }} — {{ issue.groups|length }} content groups</li>{% endfor %}
 {% for extra in staged.series_extras %}<li>Series extra: {{ extra.name }} — {{ extra.media|length }} media</li>{% endfor %}
 </ul>
-<form method="post" action="/import/{{ session_id }}/commit">
+<form method="post" action="/import/{{ session_id }}/commit" class="import-processing-form" data-processing-message="Importing comic…">
 <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
 {% if duplicate %}<p><label><input type="checkbox" name="allow_duplicate" value="yes" required> Import anyway despite duplicate warning</label></p>{% endif %}
 <button type="submit">Commit import</button>
+<div class="import-processing" hidden>
+  <progress aria-label="Import in progress"></progress>
+  <span>Importing comic… Please leave this page open.</span>
+</div>
 </form>
 {% if is_bulk %}
 <form method="post" action="/import/{{ session_id }}/skip" class="skip-import-form">

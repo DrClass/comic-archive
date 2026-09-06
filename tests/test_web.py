@@ -2592,3 +2592,72 @@ def test_series_without_direct_issues_hides_issues_section(tmp_path: Path):
     assert "Sub-series" in page.text
     assert "<h2>Issues</h2>" not in page.text
     assert "No issues." not in page.text
+
+
+def test_import_commit_is_idempotent_and_completed_pages_recover(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    issue = source / "Issue 1"
+    issue.mkdir(parents=True)
+    (issue / "001.jpg").write_bytes(b"one")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    _post(client, f"/import/{session_id}/workspace/metadata", data={
+        "folder_path": "Issue 1", "author": "Artist", "series": "Comic",
+        "series_complete": "", "issue_number": "1", "title": "", "issue_complete": "",
+    })
+    finalized = _post(client, f"/import/{session_id}/workspace/finalize", data={
+        "author": "Artist", "series": "Comic", "series_complete": "", "selected": "Issue 1",
+    }, follow_redirects=False)
+    assert finalized.status_code == 303
+
+    first = _post(client, f"/import/{session_id}/commit", data={}, follow_redirects=False)
+    assert first.status_code == 303
+    assert first.headers["location"] == f"/import/{session_id}/done"
+
+    # A replay of the same POST must not create another import or fail.
+    second = _post(client, f"/import/{session_id}/commit", data={}, follow_redirects=False)
+    assert second.status_code == 303
+    assert second.headers["location"] == f"/import/{session_id}/done"
+
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM imports").fetchone()[0] == 1
+
+    done = client.get(f"/import/{session_id}/done")
+    assert done.status_code == 200
+    assert "Import complete" in done.text
+
+    # Browser back to confirmation/workspace after completion should recover to done.
+    confirm = client.get(f"/import/{session_id}/confirm", follow_redirects=False)
+    assert confirm.status_code == 303
+    assert confirm.headers["location"] == f"/import/{session_id}/done"
+    workspace = client.get(f"/import/{session_id}/review", follow_redirects=False)
+    assert workspace.status_code == 303
+    assert workspace.headers["location"] == f"/import/{session_id}/done"
+
+
+def test_confirm_page_has_duplicate_submit_guard_and_processing_indicator(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"one")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    client = _admin_client(database, library)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    _post(client, f"/import/{session_id}/workspace/metadata", data={
+        "folder_path": ".", "author": "Artist", "series": "Comic", "series_complete": "",
+        "issue_number": "", "title": "", "issue_complete": "",
+    })
+    _post(client, f"/import/{session_id}/workspace/finalize", data={
+        "author": "Artist", "series": "Comic", "series_complete": "", "selected": ".",
+    }, follow_redirects=False)
+    confirm = client.get(f"/import/{session_id}/confirm")
+    assert 'class="import-processing-form"' in confirm.text
+    assert "Importing comic" in confirm.text
+    assert "<progress" in confirm.text

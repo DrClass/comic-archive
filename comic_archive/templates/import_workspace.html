@@ -124,13 +124,14 @@
 <section class="panel workspace-next">
   <h2>Validate and continue</h2>
   <p class="muted">This creates the staging record directly from the workspace. Empty groups or invalid structure will be reported here instead of sending you to separate metadata and organizer pages.</p>
-  <form method="post" action="/import/{{ session_id }}/workspace/finalize" id="workspace-finalize-form">
+  <form method="post" action="/import/{{ session_id }}/workspace/finalize" id="workspace-finalize-form" class="import-processing-form">
     <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
     <input type="hidden" name="selected" value="{{ selected }}">
     <input type="hidden" id="final-author" name="author" value="{{ author_value }}">
     <input type="hidden" id="final-series" name="series" value="{{ series_value }}">
     <input type="hidden" id="final-series-complete" name="series_complete" value="{{ series_complete_value }}">
     <button type="submit">Validate and continue to confirmation</button>
+    <div class="import-processing" hidden><progress aria-label="Validation in progress"></progress><span>Validating import…</span></div>
   </form>
 </section>
 

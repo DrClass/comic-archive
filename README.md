@@ -602,3 +602,13 @@ Import and bulk-import workspace state is persisted under `staging/session_state
 - Series pages with sub-series but no direct issues no longer show an empty Issues section.
 
 Synthetic issue/sub-series creation in the import workspace is intentionally deferred to the next importer milestone because it requires staged page-ownership changes beyond the existing virtual extra-group model.
+
+## Milestone 33 — resilient import actions
+
+- Commit is idempotent at the web layer: repeated/double POSTs redirect to the same completed receipt instead of attempting a second import.
+- Successful imports use POST -> Redirect -> GET, making refresh and browser back/forward navigation safe.
+- Completion receipts persist for 12 hours under staging/session_state and contain no source media; temporary uploaded media is still deleted after successful import.
+- If a commit reached SQLite but the response/receipt was lost, the web layer can recover the committed staging record from the imports table.
+- Confirmation and workspace validation forms visibly enter a processing state and disable repeated submit clicks.
+- The commit processing display uses an indeterminate progress bar because the current synchronous commit operation cannot truthfully report byte-level progress while it is running.
+- Browser back/forward cache restores submit controls via the pageshow event.
