@@ -2661,3 +2661,148 @@ def test_confirm_page_has_duplicate_submit_guard_and_processing_indicator(tmp_pa
     assert 'class="import-processing-form"' in confirm.text
     assert "Importing comic" in confirm.text
     assert "<progress" in confirm.text
+
+
+def test_series_can_be_deleted_with_managed_files(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    client = _admin_client(database, library)
+    managed_dir = library / "series" / result.series_id
+    assert managed_dir.exists()
+
+    wrong = _post(client, f"/series/{result.series_id}/delete", data={"confirmation": "wrong"}, follow_redirects=False)
+    assert wrong.status_code == 400
+    assert managed_dir.exists()
+
+    response = _post(client, f"/series/{result.series_id}/delete", data={"confirmation": "Example Comic"}, follow_redirects=False)
+    assert response.status_code == 303
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT 1 FROM series WHERE id = ?", (result.series_id,)).fetchone() is None
+        assert db.execute("SELECT 1 FROM issues WHERE series_id = ?", (result.series_id,)).fetchone() is None
+    assert not managed_dir.exists()
+
+
+def test_workspace_can_create_synthetic_issue_and_move_pages_into_it(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    issue = source / "Issue 1"
+    issue.mkdir(parents=True)
+    (issue / "001.jpg").write_bytes(b"one")
+    (issue / "002.jpg").write_bytes(b"two")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    session = client.app.state.import_sessions[session_id]
+    root_key = str(session.plan.scan.content_root.relative_to(session.plan.scan.source)).replace("\\", "/")
+    if root_key == ".":
+        root_key = "."
+    created = _post(
+        client, f"/import/{session_id}/workspace/create-node",
+        data={"parent": root_key, "kind": "issue", "name": "Recovered Chapter"},
+    )
+    assert created.status_code == 200
+    synthetic = created.json()["node_path"]
+    session = client.app.state.import_sessions[session_id]
+    page = str((session.plan.scan.primary or session.plan.scan.issues[0].primary).media[1].path)
+    moved = _post(
+        client, f"/import/{session_id}/workspace/media-targets",
+        data={"source_paths": json.dumps([page]), "target": synthetic},
+    )
+    assert moved.status_code == 204
+
+    finalized = _post(
+        client, f"/import/{session_id}/workspace/finalize",
+        data={"selected": synthetic, "author": "Artist", "series": "Comic", "series_complete": ""},
+        follow_redirects=False,
+    )
+    assert finalized.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    synthetic_issue = next(item for item in staged.issues if item.source_key == synthetic)
+    assert synthetic_issue.issue_number == "Recovered Chapter"
+    assert len(synthetic_issue.groups[0].media) == 1
+    original = next(item for item in staged.issues if item.source_key != synthetic)
+    assert len(next(group for group in original.groups if group.role == "primary").media) == 1
+
+
+def test_bulk_artist_import_discovers_root_level_pdf_as_comic(tmp_path: Path):
+    import fitz
+
+    artist = tmp_path / "incoming" / "PDF Artist"
+    artist.mkdir(parents=True)
+    pdf = artist / "Series A.pdf"
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "page one")
+    document.save(pdf)
+    document.close()
+
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+    response = _post(
+        client, "/import/bulk/scan",
+        data={"selected_path": str(artist), "author": "PDF Artist"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    choose_url = response.headers["location"]
+    choose = client.get(choose_url)
+    assert "Series A" in choose.text
+
+    started = _post(
+        client, f"{choose_url}/start",
+        data={"author": "PDF Artist", "comic_0": "yes"},
+        follow_redirects=False,
+    )
+    assert started.status_code == 303
+    workspace = client.get(started.headers["location"])
+    assert workspace.status_code == 200
+    assert "Series A" in workspace.text
+
+
+def test_workspace_can_create_synthetic_subseries_with_issue(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    for name, payload in (("Issue 1", b"one"), ("Issue 2", b"two")):
+        folder = source / name
+        folder.mkdir(parents=True)
+        (folder / "001.jpg").write_bytes(payload)
+        if name == "Issue 1":
+            (folder / "002.jpg").write_bytes(b"one-more")
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    root = client.app.state.import_sessions[session_id].plan.scan.content_root
+    scan_source = client.app.state.import_sessions[session_id].plan.scan.source
+    root_key = str(root.relative_to(scan_source)).replace("\\", "/")
+    series_node = _post(
+        client, f"/import/{session_id}/workspace/create-node",
+        data={"parent": root_key, "kind": "sub-series", "name": "Arc A"},
+    ).json()["node_path"]
+    issue_node = _post(
+        client, f"/import/{session_id}/workspace/create-node",
+        data={"parent": series_node, "kind": "issue", "name": "Recovered"},
+    ).json()["node_path"]
+    session = client.app.state.import_sessions[session_id]
+    page = str(session.plan.scan.issues[0].primary.media[0].path)
+    moved = _post(
+        client, f"/import/{session_id}/workspace/media-targets",
+        data={"source_paths": json.dumps([page]), "target": issue_node},
+    )
+    assert moved.status_code == 204
+    finalized = _post(
+        client, f"/import/{session_id}/workspace/finalize",
+        data={"selected": issue_node, "author": "Artist", "series": "Comic", "series_complete": ""},
+        follow_redirects=False,
+    )
+    assert finalized.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    assert any(item.source_key == series_node and item.parent_key == "." for item in staged.subseries)
+    created_issue = next(item for item in staged.issues if item.source_key == issue_node)
+    assert created_issue.series_key == series_node
+    assert len(created_issue.groups[0].media) == 1

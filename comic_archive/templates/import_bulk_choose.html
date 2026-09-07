@@ -3,7 +3,7 @@
 {% block content %}
 <div class="breadcrumbs"><a href="/import">Import</a> / Bulk artist import</div>
 <h1>Choose comics</h1>
-<p class="muted">{{ bulk.source }} · {{ bulk.candidates|length }} comic folder{% if bulk.candidates|length != 1 %}s{% endif %} found.</p>
+<p class="muted">{{ bulk.source }} · {{ bulk.candidates|length }} comic candidate{% if bulk.candidates|length != 1 %}s{% endif %} found.</p>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 <form method="post" action="/import/bulk/{{ bulk_id }}/start">
 <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">

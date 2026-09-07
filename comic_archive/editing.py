@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -565,3 +566,63 @@ def get_history(
                 }
             )
         return history
+
+
+def delete_series(database_path: str | Path, library_root: str | Path, series_id: str, *, confirmation: str) -> tuple[str, str | None]:
+    """Delete a series tree and its managed files.
+
+    Returns ``(author_id, parent_series_id)`` so the web UI can redirect to a
+    useful surviving page. The confirmation must exactly match the series
+    title. Database deletion happens transactionally; managed files are then
+    removed from their ID-based series directories.
+    """
+    library = Path(library_root).expanduser().resolve()
+    with _connect(database_path) as db:
+        row = db.execute(
+            "SELECT id, author_id, title, parent_series_id FROM series WHERE id = ?",
+            (series_id,),
+        ).fetchone()
+        if not row:
+            raise EditError(f"Series not found: {series_id}")
+        if confirmation != row["title"]:
+            raise EditError("Confirmation title does not match the series title")
+        descendants = db.execute(
+            """WITH RECURSIVE tree(id) AS (
+                   SELECT id FROM series WHERE id = ?
+                   UNION ALL
+                   SELECT s.id FROM series s JOIN tree t ON s.parent_series_id = t.id
+               ) SELECT id FROM tree""",
+            (series_id,),
+        ).fetchall()
+        series_ids = [item["id"] for item in descendants]
+        placeholders = ",".join("?" for _ in series_ids)
+        issue_count = db.execute(
+            f"SELECT COUNT(*) FROM issues WHERE series_id IN ({placeholders})", series_ids
+        ).fetchone()[0]
+        media_count = db.execute(
+            f"""SELECT COUNT(*) FROM media m
+                JOIN content_groups g ON g.id = m.group_id
+                WHERE g.series_id IN ({placeholders})""", series_ids
+        ).fetchone()[0]
+        before = {
+            "title": row["title"], "author_id": row["author_id"],
+            "parent_series_id": row["parent_series_id"],
+            "series_count": len(series_ids), "issue_count": issue_count, "media_count": media_count,
+        }
+        _audit(db, entity_type="series", entity_id=series_id, action="delete", before=before, after=None)
+        # imports intentionally retain no orphan references after destructive
+        # deletion; their historical summary is represented by the audit row.
+        db.execute(f"DELETE FROM imports WHERE series_id IN ({placeholders})", series_ids)
+        db.execute("DELETE FROM series WHERE id = ?", (series_id,))
+        author_id, parent_id = row["author_id"], row["parent_series_id"]
+
+    series_root = (library / "series").resolve()
+    for item_id in series_ids:
+        target = (series_root / item_id).resolve()
+        try:
+            target.relative_to(series_root)
+        except ValueError:
+            continue
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+    return author_id, parent_id

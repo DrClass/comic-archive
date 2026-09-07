@@ -28,7 +28,7 @@
       <div class="workspace-node{% if node.path == selected %} selected{% endif %}{% if node.virtual %} virtual{% endif %}"
            data-path="{{ node.path }}" data-parent="{{ node.parent or '.' }}" data-depth="{{ node.depth }}"
            data-media-target="{% if node.path in media_target_paths %}true{% else %}false{% endif %}"
-           {% if not node.is_root and not node.virtual %}draggable="true"{% endif %}>
+           {% if not node.is_root and (not node.virtual or node.synthetic) %}draggable="true"{% endif %}>
         <span class="workspace-drag" title="Drag to reorder">{% if node.is_root or node.virtual %}&nbsp;{% else %}⋮⋮{% endif %}</span>
         <a class="workspace-folder" href="/import/{{ session_id }}/review?folder={{ node.path|urlencode }}" style="padding-left: {{ node.depth * 1.15 }}rem">
           <span class="workspace-caret">{% if node.child_count %}▾{% else %}•{% endif %}</span>
@@ -36,6 +36,8 @@
           {% if node.direct_files %}<span class="muted">{{ node.direct_files }} file{% if node.direct_files != 1 %}s{% endif %}</span>{% endif %}
         </a>
         {% if node.is_root %}
+          <span class="workspace-role fixed">{{ node.role }}</span>
+        {% elif node.synthetic %}
           <span class="workspace-role fixed">{{ node.role }}</span>
         {% elif node.virtual %}
           <span class="workspace-role fixed">Issue-Extras</span>
@@ -58,6 +60,18 @@
         {% endif %}
       </div>
       {% endfor %}
+    </div>
+    <div class="workspace-create-structure">
+      <h3>Create structure</h3>
+      <p class="muted">Create logical issues or nested series without changing the uploaded folders.</p>
+      <select id="new-node-parent" aria-label="Parent series">
+        {% for node in tree %}{% if node.is_root or node.role == 'Sub-Series' %}<option value="{{ node.path }}">Under {{ node.name }}</option>{% endif %}{% endfor %}
+      </select>
+      <input id="new-node-name" type="text" placeholder="Name or issue label">
+      <div class="inline-controls">
+        <button type="button" class="create-node-button" data-kind="issue">New issue</button>
+        <button type="button" class="create-node-button" data-kind="sub-series">New series/sub-series</button>
+      </div>
     </div>
   </section>
 
@@ -99,6 +113,9 @@
         <button id="create-extra-button" type="button">Create group</button>
       </div>
     </div>
+    {% endif %}
+    {% if selected_node.synthetic %}
+    <p><button id="remove-node-button" type="button">Remove this workspace-created {{ selected_node.role|lower }}</button></p>
     {% elif selected_node.virtual %}
     <p><button id="remove-extra-button" type="button">Remove this empty/custom group</button></p>
     {% endif %}
@@ -235,6 +252,31 @@
     }
     await saveMaster();
     await saveNode();
+  }
+
+  for (const button of document.querySelectorAll('.create-node-button')) {
+    button.addEventListener('click', async () => {
+      const name = document.getElementById('new-node-name').value.trim();
+      const parent = document.getElementById('new-node-parent').value;
+      if (!name) return;
+      try {
+        await flushMetadata();
+        const response = await post(`/import/${sessionId}/workspace/create-node`, {parent, kind: button.dataset.kind, name});
+        const data = await response.json();
+        location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(data.node_path)}`;
+      } catch (error) { alert(error.message); }
+    });
+  }
+
+  const removeNodeButton = document.getElementById('remove-node-button');
+  if (removeNodeButton) {
+    removeNodeButton.addEventListener('click', async () => {
+      try {
+        await flushMetadata();
+        await post(`/import/${sessionId}/workspace/remove-node`, {folder_path: selected});
+        location.href = `/import/${sessionId}/review`;
+      } catch (error) { alert(error.message); }
+    });
   }
 
   const createButton = document.getElementById('create-extra-button');

@@ -612,3 +612,10 @@ Synthetic issue/sub-series creation in the import workspace is intentionally def
 - Confirmation and workspace validation forms visibly enter a processing state and disable repeated submit clicks.
 - The commit processing display uses an indeterminate progress bar because the current synchronous commit operation cannot truthfully report byte-level progress while it is running.
 - Browser back/forward cache restores submit controls via the pageshow event.
+
+
+## Milestone 34 additions
+
+- Admins can permanently delete a series tree from Edit series after typing its exact title. Managed pages, extras, thumbnails, descendant sub-series/issues, and import references are removed; original external source files are untouched.
+- The import workspace can create logical issues and nested series/sub-series without changing the uploaded source tree. Pages can be dragged into these synthetic issues before staging. Empty synthetic issues are rejected at validation.
+- Bulk artist discovery includes root-level PDF files as individual comic candidates. They are wrapped only in temporary staging storage for scanning/rendering, leaving source PDFs untouched. Multiple numbered root PDFs can be imported sequentially into the same series by assigning the same series title and distinct issue labels in the workspace.

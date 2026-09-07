@@ -1,5 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Edit {{ series.title }} — Comic Archive{% endblock %}
+{% block title %}Edit {{ series.title }} — Comic Archive
+<section class="panel danger-zone">
+  <h2>Delete series</h2>
+  <p class="muted">This permanently deletes this series{% if series.children %}, its sub-series{% endif %}, all issues, managed pages, extras, and thumbnails. Source files outside the managed library are not touched.</p>
+  <form method="post" action="/series/{{ series.id }}/delete" onsubmit="return confirm('Permanently delete this series and its contents?')">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <div class="form-row"><label for="confirmation">Type <strong>{{ series.title }}</strong> to confirm</label><input id="confirmation" name="confirmation" type="text" autocomplete="off" required></div>
+    <button type="submit" class="danger-button">Delete series permanently</button>
+  </form>
+</section>
+{% endblock %}
 {% block content %}
 <div class="breadcrumbs"><a href="/series/{{ series.id }}">{{ series.title }}</a> / Edit</div>
 <h1>Edit series</h1>
@@ -24,4 +34,14 @@
   {% endif %}
   <button type="submit">Save changes</button>
 </form>
+
+<section class="panel danger-zone">
+  <h2>Delete series</h2>
+  <p class="muted">This permanently deletes this series{% if series.children %}, its sub-series{% endif %}, all issues, managed pages, extras, and thumbnails. Source files outside the managed library are not touched.</p>
+  <form method="post" action="/series/{{ series.id }}/delete" onsubmit="return confirm('Permanently delete this series and its contents?')">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    <div class="form-row"><label for="confirmation">Type <strong>{{ series.title }}</strong> to confirm</label><input id="confirmation" name="confirmation" type="text" autocomplete="off" required></div>
+    <button type="submit" class="danger-button">Delete series permanently</button>
+  </form>
+</section>
 {% endblock %}
