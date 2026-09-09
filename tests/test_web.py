@@ -2806,3 +2806,76 @@ def test_workspace_can_create_synthetic_subseries_with_issue(tmp_path: Path):
     created_issue = next(item for item in staged.issues if item.source_key == issue_node)
     assert created_issue.series_key == series_node
     assert len(created_issue.groups[0].media) == 1
+
+
+def test_workspace_generic_folder_can_be_reparented_and_reclassified(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    for path in ("Chapter 1/001.jpg", "Chapter 2/001.jpg"):
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.encode())
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    session = client.app.state.import_sessions[session_id]
+    root_key = str(session.plan.scan.content_root.relative_to(session.plan.scan.source)).replace("\\", "/")
+    created = _post(client, f"/import/{session_id}/workspace/create-node", data={"parent": root_key, "kind": "folder", "name": "Arc A"})
+    folder = created.json()["node_path"]
+    role = _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": folder, "role": "sub-series"}, follow_redirects=False)
+    assert role.status_code == 303
+    moved = _post(client, f"/import/{session_id}/workspace/move-node", data={"folder_path": "Chapter 1", "parent": folder})
+    assert moved.status_code == 204
+    tree = __import__("comic_archive.web", fromlist=["_workspace_tree"])._workspace_tree(session)
+    chapter = next(node for node in tree if str(node["path"]) == "Chapter 1")
+    arc = next(node for node in tree if str(node["path"]) == folder)
+    assert chapter["parent"] == folder
+    assert arc["role"] == "Sub-Series"
+
+
+def test_workspace_can_ignore_specific_file_during_import(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"one")
+    (source / "junk.png").write_bytes(b"junk")
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    session = client.app.state.import_sessions[session_id]
+    junk = next(media for media in session.plan.scan.primary.media if media.relative_path.name == "junk.png")
+    ignored = _post(client, f"/import/{session_id}/workspace/ignore-media", data={"source_paths": json.dumps([str(junk.path)]), "ignore": "yes"})
+    assert ignored.status_code == 204
+    finalized = _post(client, f"/import/{session_id}/workspace/finalize", data={"author": "Artist", "series": "Comic", "series_complete": "", "selected": "."}, follow_redirects=False)
+    assert finalized.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    assert sum(len(group.media) for issue in staged.issues for group in issue.groups) == 1
+    assert all(media.relative_path != "junk.png" for issue in staged.issues for group in issue.groups for media in group.media)
+
+
+def test_workspace_root_can_be_container_with_child_series(tmp_path: Path):
+    source = tmp_path / "incoming" / "Artist Dump" / "Actual Comic"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"one")
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source.parent)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    session = client.app.state.import_sessions[session_id]
+    root_key = str(session.plan.scan.content_root.relative_to(session.plan.scan.source)).replace("\\", "/")
+    # The scanner may collapse a harmless wrapper; create an explicit logical root
+    # series to verify the editable-root behavior independent of that heuristic.
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": root_key, "role": "container"}, follow_redirects=False)
+    created = _post(client, f"/import/{session_id}/workspace/create-node", data={"parent": root_key, "kind": "folder", "name": "Actual Comic"})
+    child = created.json()["node_path"]
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": child, "role": "series"}, follow_redirects=False)
+    # Move the scanned root pages into a new issue beneath that Series.
+    issue_created = _post(client, f"/import/{session_id}/workspace/create-node", data={"parent": child, "kind": "issue", "name": "One-shot"})
+    issue = issue_created.json()["node_path"]
+    page = str(session.plan.scan.primary.media[0].path)
+    _post(client, f"/import/{session_id}/workspace/media-targets", data={"source_paths": json.dumps([page]), "target": issue})
+    finalized = _post(client, f"/import/{session_id}/workspace/finalize", data={"author": "Artist", "series": "Ignored Root Label", "series_complete": "", "selected": issue}, follow_redirects=False)
+    assert finalized.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    assert staged.series == "Actual Comic"
+    assert len(staged.issues) == 1

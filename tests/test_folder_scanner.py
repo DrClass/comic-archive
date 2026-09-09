@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 
 from comic_archive.importer.models import MediaKind, SuggestedRole
 from comic_archive.importer.scanner import scan_folder
@@ -330,3 +331,33 @@ def test_pdf_inside_issue_with_extras_stays_primary_and_extras_stay_separate(tmp
     assert len(first.extras) == 1
     assert first.extras[0].name == "Extras"
     assert len(first.extras[0].media) == 1
+
+
+def test_multiple_root_pdfs_seed_separate_issues(tmp_path: Path):
+    fitz = pytest.importorskip("fitz")
+    source = tmp_path / "Amazing Comic"
+    source.mkdir()
+    for name in ("Amazing Comic 1.pdf", "Amazing Comic 2.pdf"):
+        doc = fitz.open()
+        doc.new_page()
+        doc.save(source / name)
+        doc.close()
+    scan = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+    assert scan.is_series_candidate
+    assert [issue.name for issue in scan.issues] == ["Amazing Comic 1", "Amazing Comic 2"]
+    assert all(len(issue.primary.media) == 1 for issue in scan.issues)
+
+
+def test_loose_cover_does_not_flatten_issue_folders(tmp_path: Path):
+    source = tmp_path / "Amazing Comic"
+    for chapter in ("Chapter 1", "Chapter 2", "Chapter 3"):
+        target = source / chapter / "001.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(chapter.encode())
+    (source / "cover.png").write_bytes(b"cover")
+    scan = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+    assert scan.is_series_candidate
+    assert [issue.name for issue in scan.issues] == ["Chapter 1", "Chapter 2", "Chapter 3"]
+    assert len(scan.extras) == 1
+    assert scan.extras[0].name == "Series extras"
+    assert [item.relative_path.as_posix() for item in scan.extras[0].media] == ["cover.png"]

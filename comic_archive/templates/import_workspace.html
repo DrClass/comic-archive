@@ -28,33 +28,35 @@
       <div class="workspace-node{% if node.path == selected %} selected{% endif %}{% if node.virtual %} virtual{% endif %}"
            data-path="{{ node.path }}" data-parent="{{ node.parent or '.' }}" data-depth="{{ node.depth }}"
            data-media-target="{% if node.path in media_target_paths %}true{% else %}false{% endif %}"
-           {% if not node.is_root and (not node.virtual or node.synthetic) %}draggable="true"{% endif %}>
-        <span class="workspace-drag" title="Drag to reorder">{% if node.is_root or node.virtual %}&nbsp;{% else %}⋮⋮{% endif %}</span>
+           {% if not node.is_root %}draggable="true"{% endif %}>
+        <span class="workspace-drag" title="Drag to reorder">{% if node.is_root %}&nbsp;{% else %}⋮⋮{% endif %}</span>
         <a class="workspace-folder" href="/import/{{ session_id }}/review?folder={{ node.path|urlencode }}" style="padding-left: {{ node.depth * 1.15 }}rem">
           <span class="workspace-caret">{% if node.child_count %}▾{% else %}•{% endif %}</span>
           <strong>{{ node.name }}/</strong>
           {% if node.direct_files %}<span class="muted">{{ node.direct_files }} file{% if node.direct_files != 1 %}s{% endif %}</span>{% endif %}
         </a>
-        {% if node.is_root %}
-          <span class="workspace-role fixed">{{ node.role }}</span>
-        {% elif node.synthetic %}
-          <span class="workspace-role fixed">{{ node.role }}</span>
-        {% elif node.virtual %}
-          <span class="workspace-role fixed">Issue-Extras</span>
-        {% else %}
-          <form method="post" action="/import/{{ session_id }}/workspace/role" class="workspace-role-form">
-            <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
-            <input type="hidden" name="folder_path" value="{{ node.path }}">
-            <select name="role" aria-label="Role for {{ node.name }}" onchange="this.form.submit()">
-              <option value="issue" {% if node.role == 'Issue' %}selected{% endif %}>Issue</option>
+        <form method="post" action="/import/{{ session_id }}/workspace/role" class="workspace-role-form">
+          <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+          <input type="hidden" name="folder_path" value="{{ node.path }}">
+          <select name="role" aria-label="Role for {{ node.name }}" class="workspace-role-select">
+            {% if node.is_root %}
+              <option value="series" {% if node.role == 'Series' %}selected{% endif %}>Series</option>
+              <option value="issue" {% if node.role == 'Issue' %}selected{% endif %}>Issue / one-shot</option>
+              <option value="container" {% if node.role == 'Container' %}selected{% endif %}>Container</option>
+              <option value="ignore" {% if node.role == 'Ignore' %}selected{% endif %}>Ignore</option>
+            {% else %}
+              <option value="unassigned" {% if node.role == 'Unassigned' %}selected{% endif %}>Unassigned</option>
+              <option value="series" {% if node.role == 'Series' %}selected{% endif %}>Series</option>
               <option value="sub-series" {% if node.role == 'Sub-Series' %}selected{% endif %}>Sub-Series</option>
+              <option value="issue" {% if node.role == 'Issue' %}selected{% endif %}>Issue</option>
               <option value="issue-extras" {% if node.role == 'Issue-Extras' %}selected{% endif %}>Issue-Extras</option>
               <option value="series-extras" {% if node.role == 'Series-Extras' %}selected{% endif %}>Series-Extras</option>
               <option value="primary-pages" {% if node.role == 'Primary Pages' %}selected{% endif %}>Primary Pages</option>
               <option value="container" {% if node.role == 'Container' %}selected{% endif %}>Container</option>
-            </select>
-          </form>
-        {% endif %}
+              <option value="ignore" {% if node.role == 'Ignore' %}selected{% endif %}>Ignore</option>
+            {% endif %}
+          </select>
+        </form>
         {% if node.role == 'Issue' and not node.is_root %}
         <div hidden><form method="post" action="/import/{{ session_id }}/review/mark-subseries"><input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}"><button type="submit" name="folder_path" value="{{ node.path }}">Make sub-series</button></form></div>
         {% endif %}
@@ -63,14 +65,10 @@
     </div>
     <div class="workspace-create-structure">
       <h3>Create structure</h3>
-      <p class="muted">Create logical issues or nested series without changing the uploaded folders.</p>
-      <select id="new-node-parent" aria-label="Parent series">
-        {% for node in tree %}{% if node.is_root or node.role == 'Sub-Series' %}<option value="{{ node.path }}">Under {{ node.name }}</option>{% endif %}{% endfor %}
-      </select>
-      <input id="new-node-name" type="text" placeholder="Name or issue label">
+      <p class="muted">Create a normal virtual folder under the upload root, then drag it anywhere and assign its role.</p>
+      <input id="new-node-name" type="text" placeholder="New folder name" value="New folder">
       <div class="inline-controls">
-        <button type="button" class="create-node-button" data-kind="issue">New issue</button>
-        <button type="button" class="create-node-button" data-kind="sub-series">New series/sub-series</button>
+        <button type="button" class="create-node-button" data-kind="folder" data-parent="{{ tree[0].path }}">+ New folder</button>
       </div>
     </div>
   </section>
@@ -83,9 +81,9 @@
       </div>
     </div>
 
-    {% if selected_node.role in ['Issue', 'Sub-Series', 'Issue-Extras', 'Series-Extras'] %}
     <form id="workspace-node-form" class="workspace-node-metadata">
       <input type="hidden" name="folder_path" value="{{ selected }}">
+      <div class="form-row"><label>Folder label</label><input name="display_name" type="text" required value="{{ selected_node.name }}"></div>
       {% if selected_node.is_root %}
         <input type="hidden" name="author" value="{{ author_value }}">
         <input type="hidden" name="series" value="{{ series_value }}">
@@ -95,40 +93,29 @@
         <div class="form-row"><label>Issue number/label</label><input name="issue_number" type="text" value="{{ selected_metadata.issue_number or '' }}"></div>
         <div class="form-row"><label>Issue title</label><input name="title" type="text" value="{{ selected_metadata.title or '' }}"></div>
         <div class="form-row"><label>Completeness</label><select name="{% if selected_node.is_root %}issue_complete{% else %}complete{% endif %}"><option value="" {% if not selected_metadata.complete %}selected{% endif %}>Unknown</option><option value="yes" {% if selected_metadata.complete == 'yes' %}selected{% endif %}>Complete</option><option value="no" {% if selected_metadata.complete == 'no' %}selected{% endif %}>Incomplete</option></select></div>
-      {% elif selected_node.role == 'Sub-Series' %}
-        <div class="form-row"><label>Sub-series title</label><input name="title" type="text" required value="{{ selected_metadata.title or selected_node.name }}"></div>
+      {% elif selected_node.role in ['Series', 'Sub-Series'] %}
+        <div class="form-row"><label>Series title</label><input name="title" type="text" required value="{{ selected_metadata.title or selected_node.name }}"></div>
         <div class="form-row"><label>Completeness</label><select name="complete"><option value="" {% if not selected_metadata.complete %}selected{% endif %}>Unknown</option><option value="yes" {% if selected_metadata.complete == 'yes' %}selected{% endif %}>Complete</option><option value="no" {% if selected_metadata.complete == 'no' %}selected{% endif %}>Incomplete</option></select></div>
-      {% else %}
+      {% elif selected_node.role in ['Issue-Extras', 'Series-Extras'] %}
         <div class="form-row"><label>Group name</label><input name="title" type="text" required value="{{ selected_metadata.title or selected_node.name }}"></div>
       {% endif %}
       <div class="form-row workspace-save-row"><span id="node-save-status" class="muted">Changes save automatically</span></div>
     </form>
-    {% endif %}
 
-    {% if selected_node.role == 'Issue' %}
-    <div class="inline-create workspace-create-group">
-      <label for="new-extra-name">Create issue extra group</label>
-      <div class="inline-controls">
-        <input id="new-extra-name" type="text" placeholder="e.g. Textless, Covers, Bonus">
-        <button id="create-extra-button" type="button">Create group</button>
-      </div>
-    </div>
-    {% endif %}
     {% if selected_node.synthetic %}
-    <p><button id="remove-node-button" type="button">Remove this workspace-created {{ selected_node.role|lower }}</button></p>
-    {% elif selected_node.virtual %}
-    <p><button id="remove-extra-button" type="button">Remove this empty/custom group</button></p>
+    <p><button id="remove-node-button" type="button">Remove this workspace-created folder</button></p>
     {% endif %}
 
     {% if selected_media %}
       <p class="muted">Drag pages to change reading order. Click a page to select it; Ctrl/Cmd-click selects multiple pages, then drag the selection onto the main issue or an extras folder in the tree.</p>
+      <div class="inline-controls workspace-file-actions"><button type="button" id="ignore-selected-button">Ignore selected</button><button type="button" id="restore-selected-button">Restore selected</button></div>
       <div id="workspace-media" class="workspace-media-list" data-folder="{{ selected }}">
       {% for media in selected_media %}
-        <div class="workspace-media-row" draggable="true" data-source="{{ media.path }}">
+        <div class="workspace-media-row{% if media.path|string in ignored_media %} ignored{% endif %}" draggable="true" data-source="{{ media.path }}">
           <span class="workspace-drag">⋮⋮</span>
           <span class="workspace-page-number">{{ loop.index }}</span>
           <span class="workspace-media-name">{{ media.relative_path }}</span>
-          <span class="muted workspace-media-kind">{{ media.media_kind.value|upper }}</span>
+          <span class="muted workspace-media-kind">{{ media.media_kind.value|upper }}{% if media.path|string in ignored_media %} · IGNORED{% endif %}</span>
         </div>
       {% endfor %}
       </div>
@@ -256,15 +243,25 @@
 
   for (const button of document.querySelectorAll('.create-node-button')) {
     button.addEventListener('click', async () => {
-      const name = document.getElementById('new-node-name').value.trim();
-      const parent = document.getElementById('new-node-parent').value;
-      if (!name) return;
+      const name = document.getElementById('new-node-name').value.trim() || 'New folder';
+      const parent = button.dataset.parent;
       try {
         await flushMetadata();
         const response = await post(`/import/${sessionId}/workspace/create-node`, {parent, kind: button.dataset.kind, name});
         const data = await response.json();
         location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(data.node_path)}`;
       } catch (error) { alert(error.message); }
+    });
+  }
+
+  for (const select of document.querySelectorAll('.workspace-role-select')) {
+    select.addEventListener('change', async () => {
+      const form = select.closest('form');
+      try {
+        await flushMetadata();
+        await post(`/import/${sessionId}/workspace/role`, {folder_path: form.folder_path.value, role: select.value});
+        location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(form.folder_path.value)}`;
+      } catch (error) { alert(error.message); location.reload(); }
     });
   }
 
@@ -304,6 +301,19 @@
       } catch (error) { alert(error.message); }
     });
   }
+
+  async function setIgnoredSelected(ignore) {
+    if (!selectedSources.size) { alert('Select one or more files first.'); return; }
+    try {
+      await flushMetadata();
+      await post(`/import/${sessionId}/workspace/ignore-media`, {source_paths: JSON.stringify([...selectedSources]), ignore: ignore ? 'yes' : 'no'});
+      location.reload();
+    } catch (error) { alert(error.message); }
+  }
+  const ignoreButton = document.getElementById('ignore-selected-button');
+  const restoreButton = document.getElementById('restore-selected-button');
+  if (ignoreButton) ignoreButton.addEventListener('click', () => setIgnoredSelected(true));
+  if (restoreButton) restoreButton.addEventListener('click', () => setIgnoredSelected(false));
 
   let draggedNode = null;
   let draggedMedia = null;
@@ -400,8 +410,9 @@
         target.classList.add('media-drop-hover');
         return;
       }
-      if (!draggedNode || !target || target === draggedNode || target.dataset.parent !== draggedNode.dataset.parent || target.classList.contains('virtual')) return;
+      if (!draggedNode || !target || target === draggedNode) return;
       event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
     });
     tree.addEventListener('dragleave', event => {
       const target = event.target.closest('.workspace-node');
@@ -420,28 +431,24 @@
         } catch (error) { alert(error.message); }
         return;
       }
-      if (!draggedNode || !target || target === draggedNode || target.dataset.parent !== draggedNode.dataset.parent || target.classList.contains('virtual')) return;
+      if (!draggedNode || !target || target === draggedNode) return;
       event.preventDefault();
-      const parent = draggedNode.dataset.parent;
-      const rows = [...tree.querySelectorAll('.workspace-node')];
-      const sourceIndex = rows.indexOf(draggedNode);
-      const sourceDepth = Number(draggedNode.dataset.depth);
-      let endIndex = sourceIndex + 1;
-      while (endIndex < rows.length && Number(rows[endIndex].dataset.depth) > sourceDepth) endIndex++;
-      const block = rows.slice(sourceIndex, endIndex);
+      const oldParent = draggedNode.dataset.parent;
       const targetRect = target.getBoundingClientRect();
-      const insertBefore = event.clientY < targetRect.top + targetRect.height / 2;
-      const reference = insertBefore ? target : (() => {
-        const targetIndex = rows.indexOf(target), targetDepth = Number(target.dataset.depth);
-        let after = targetIndex + 1;
-        while (after < rows.length && Number(rows[after].dataset.depth) > targetDepth) after++;
-        return rows[after] || null;
-      })();
-      for (const row of block) tree.insertBefore(row, reference);
-      const ordered = [...tree.querySelectorAll(`.workspace-node[data-parent="${CSS.escape(parent)}"]`)]
-        .filter(row => !row.classList.contains('virtual')).map(row => row.dataset.path);
-      try { await post(`/import/${sessionId}/workspace/folder-order`, {parent, ordered_paths: JSON.stringify(ordered)}); }
-      catch (error) { alert(error.message); location.reload(); }
+      const relativeY = (event.clientY - targetRect.top) / targetRect.height;
+      try {
+        await flushMetadata();
+        if (target.dataset.parent === oldParent && (relativeY < 0.28 || relativeY > 0.72)) {
+          const siblings = [...tree.querySelectorAll(`.workspace-node[data-parent="${CSS.escape(oldParent)}"]`)];
+          const order = siblings.map(row => row.dataset.path).filter(path => path !== draggedNode.dataset.path);
+          const targetIndex = order.indexOf(target.dataset.path);
+          order.splice(targetIndex + (relativeY > 0.72 ? 1 : 0), 0, draggedNode.dataset.path);
+          await post(`/import/${sessionId}/workspace/folder-order`, {parent: oldParent, ordered_paths: JSON.stringify(order)});
+        } else {
+          await post(`/import/${sessionId}/workspace/move-node`, {folder_path: draggedNode.dataset.path, parent: target.dataset.path});
+        }
+        location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(draggedNode.dataset.path)}`;
+      } catch (error) { alert(error.message); location.reload(); }
     });
   }
 

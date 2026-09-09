@@ -378,6 +378,12 @@ def _candidate_series_children(
     return issue_dirs, extra_dirs
 
 
+def _looks_like_loose_series_extra(path: Path) -> bool:
+    stem = path.stem.casefold().replace("-", " ").replace("_", " ")
+    words = set(stem.split())
+    return bool(words & {"cover", "covers", "poster", "promo", "promotional", "banner", "logo", "thumbnail", "thumb"})
+
+
 def scan_folder(
     source: str | Path,
     *,
@@ -427,8 +433,11 @@ def scan_folder(
         path for path in subseries_overrides
         if path == content_root.resolve() or content_root.resolve() in path.parents
     }
-    is_series = not direct_media_files and (
-        len(issue_dirs) >= 2 or (len(issue_dirs) >= 1 and bool(series_extra_dirs)) or bool(content_subseries)
+    direct_pdfs = [path for path in direct_media_files if path.suffix.casefold() == ".pdf"]
+    pdf_only_series = len(direct_pdfs) >= 2 and len(direct_pdfs) == len(direct_media_files)
+    loose_extras_only = bool(direct_media_files) and all(_looks_like_loose_series_extra(path) for path in direct_media_files)
+    is_series = (not direct_media_files or pdf_only_series or loose_extras_only) and (
+        len(issue_dirs) >= 2 or (len(issue_dirs) >= 1 and bool(series_extra_dirs)) or bool(content_subseries) or pdf_only_series
     )
 
     primary: ScannedGroup | None = None
@@ -475,6 +484,26 @@ def scan_folder(
 
     if is_series:
         scan_series_level(content_root, Path('.'))
+        # Multiple loose PDFs at a series root are much more likely to be
+        # separate issues than one continuous page stream. Seed one logical
+        # issue per PDF; the virtual workspace can regroup/reorder them freely.
+        if pdf_only_series:
+            for pdf_path in sorted(direct_pdfs, key=lambda p: natural_path_key(p.relative_to(content_root))):
+                media = _scan_media([pdf_path], content_root, pdf_cache_root)
+                issue_key = Path(f"__pdf_issue__/{pdf_path.stem}")
+                primary_group = ScannedGroup(
+                    name=pdf_path.stem, relative_path=issue_key, suggested_role=SuggestedRole.PRIMARY,
+                    media=media, series_path=Path('.'),
+                )
+                issues.append(ScannedIssue(
+                    name=pdf_path.stem, relative_path=issue_key, primary=primary_group, extras=[], series_path=Path('.'),
+                ))
+        elif loose_extras_only and direct_media_files:
+            extras.append(ScannedGroup(
+                name="Series extras", relative_path=Path("__loose_series_extras__"),
+                suggested_role=SuggestedRole.EXTRA,
+                media=_scan_media(direct_media_files, content_root, pdf_cache_root), series_path=Path('.'),
+            ))
     else:
         primary, extras = _scan_single_issue(
             content_root,

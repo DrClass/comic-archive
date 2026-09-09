@@ -619,3 +619,13 @@ Synthetic issue/sub-series creation in the import workspace is intentionally def
 - Admins can permanently delete a series tree from Edit series after typing its exact title. Managed pages, extras, thumbnails, descendant sub-series/issues, and import references are removed; original external source files are untouched.
 - The import workspace can create logical issues and nested series/sub-series without changing the uploaded source tree. Pages can be dragged into these synthetic issues before staging. Empty synthetic issues are rejected at validation.
 - Bulk artist discovery includes root-level PDF files as individual comic candidates. They are wrapped only in temporary staging storage for scanning/rendering, leaving source PDFs untouched. Multiple numbered root PDFs can be imported sequentially into the same series by assigning the same series title and distinct issue labels in the workspace.
+
+## Milestone 35 — virtual filesystem import workspace
+
+The import workspace now treats the scanned source as a starting point rather than an immutable structure. The upload root and folders can be reclassified without rescanning, generic virtual folders can be created and then assigned a role, folders can be dragged into other folders or reordered among siblings, and selected files can be moved freely into compatible Issue / Primary Pages / Issue Extras / Series Extras destinations. Workspace-created folders and source folders are only logical import structure; source files are never moved or modified.
+
+Supported workspace roles now include Series, Sub-Series, Issue, Issue-Extras, Series-Extras, Primary Pages, Container, Unassigned, and Ignore. The physical upload root can be Series, Issue/one-shot, Container, or Ignore. Folder labels and semantic metadata autosave. A virtual folder starts Unassigned and can be dragged/reclassified later. Drag order is the persisted issue/sub-series order.
+
+Files can be ignored individually during import and restored before commit. Setting a whole folder/node to Ignore excludes its descendant import content. Validation blocks files left in non-semantic Container/Unassigned locations and points out that they need a destination or Ignore state.
+
+Scanner hardening added two default guesses: a folder containing multiple PDFs and no other supported media seeds one issue candidate per PDF, and a series containing multiple issue-like child folders plus only loose cover/promo-style media keeps the child folders as issues and places the loose media into Series extras instead of flattening the import.
