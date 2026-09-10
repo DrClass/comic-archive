@@ -54,6 +54,21 @@ UPLOAD_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
 logger = logging.getLogger("comic_archive.web")
 
 
+def _configure_diagnostic_logging() -> None:
+    """Ensure importer diagnostics always reach stderr/journald at INFO."""
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not any(getattr(handler, "_comic_archive_diag", False) for handler in logger.handlers):
+        handler = logging.StreamHandler()
+        handler._comic_archive_diag = True  # type: ignore[attr-defined]
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("CA_DIAG %(message)s"))
+        logger.addHandler(handler)
+
+
+_configure_diagnostic_logging()
+
+
 def _process_memory_snapshot() -> dict[str, float | int | None]:
     values: dict[str, float | int | None] = {
         "rss_mib": None, "anon_mib": None, "file_mib": None,
@@ -164,6 +179,7 @@ class ImportSession:
     workspace_cached_tree: list[dict[str, object]] | None = None
     workspace_cached_folder_media: dict[str, list[str]] = field(default_factory=dict)
     workspace_cached_media_index: dict[str, object] = field(default_factory=dict)
+    workspace_cached_media_owner: dict[str, str] = field(default_factory=dict)
     workspace_cache_builds: int = 0
 
 
@@ -899,6 +915,7 @@ def _workspace_invalidate_cache(session: ImportSession) -> None:
     session.workspace_cached_tree = None
     session.workspace_cached_folder_media.clear()
     session.workspace_cached_media_index.clear()
+    session.workspace_cached_media_owner.clear()
 
 
 def _workspace_ensure_cache(session: ImportSession) -> None:
@@ -914,6 +931,7 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
     media_items = _workspace_all_media(session)
     media_index = {str(item.path): item for item in media_items}
     by_folder: dict[str, list[str]] = {str(node["path"]): [] for node in tree}
+    owner_by_media: dict[str, str] = {}
     for item in media_items:
         media_path = str(item.path)
         if media_path in session.workspace_ignored_media:
@@ -923,6 +941,7 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
             owner = _workspace_origin_for_media_in_tree(session, media_path, tree)
         if owner in by_folder:
             by_folder[owner].append(media_path)
+            owner_by_media[media_path] = owner
 
     for paths in by_folder.values():
         paths.sort(key=lambda value: getattr(media_index[value], "order", 0))
@@ -932,15 +951,16 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
     session.workspace_cached_tree = tree
     session.workspace_cached_folder_media = by_folder
     session.workspace_cached_media_index = media_index
+    session.workspace_cached_media_owner = owner_by_media
     session.workspace_cache_signature = signature
     session.workspace_cache_builds += 1
     logger.info(
-        "workspace cache built build=%d nodes=%d media=%d folders=%d elapsed=%.2fs",
-        session.workspace_cache_builds, len(tree), len(media_items), len(by_folder), time.monotonic() - cache_started,
+        "workspace cache built build=%d nodes=%d media=%d owners=%d folders=%d elapsed=%.2fs",
+        session.workspace_cache_builds, len(tree), len(media_items), len(owner_by_media), len(by_folder), time.monotonic() - cache_started,
     )
     _log_memory_checkpoint(
         "workspace-cache-complete", cache_build=session.workspace_cache_builds,
-        nodes=len(tree), media=len(media_items), folders=len(by_folder),
+        nodes=len(tree), media=len(media_items), owners=len(owner_by_media), folders=len(by_folder),
     )
 
 
@@ -1330,7 +1350,14 @@ def _workspace_build_staged_import(
         source = str(item.path)
         if source in session.workspace_ignored_media:
             continue
-        target = session.workspace_media_targets.get(source) or _workspace_origin_for_media(session, source)
+        # The workspace cache already resolved automatic ownership. Reuse it
+        # instead of rescanning every semantic node for every media item during
+        # validation. Explicit user targets still take precedence.
+        target = session.workspace_media_targets.get(source) or session.workspace_cached_media_owner.get(source)
+        if target is None:
+            # Defensive fallback for restored/legacy state not represented in
+            # the current cache; normal validation should not hit this path.
+            target = _workspace_origin_for_media(session, source)
         if not target or target not in nodes:
             unassigned.append(str(item.relative_path))
             continue
@@ -1341,7 +1368,7 @@ def _workspace_build_staged_import(
             buckets.setdefault(target, []).append(item)
         else:
             unassigned.append(str(item.relative_path))
-        if media_index % 1000 == 0 or media_index == total_media:
+        if media_index % 250 == 0 or media_index == total_media:
             report("ownership", media_index, total_media, f"Resolved {media_index:,} of {total_media:,} media files")
     if unassigned:
         preview = ", ".join(unassigned[:5])
@@ -2062,6 +2089,11 @@ def create_app(
     app.state.import_progress: dict[str, dict[str, object]] = {}
     app.state.staging_progress: dict[str, dict[str, object]] = {}
     app.state.last_upload_sweep = 0.0
+    logger.info(
+        "diagnostics enabled database=%s staging=%s upload_checkpoint_files=%d upload_buffer_mib=%.1f",
+        database, staging, UPLOAD_STATE_CHECKPOINT_FILES, UPLOAD_WRITE_BUFFER_BYTES / (1024 * 1024),
+    )
+    _log_memory_checkpoint("app-startup")
 
     @app.middleware("http")
     async def require_authentication(request: Request, call_next):
@@ -2402,7 +2434,7 @@ def create_app(
                 last_scan_phase: list[str | None] = [None]
                 def scan_progress(phase: str, current: int, total: int, message: str) -> None:
                     upload.scan_progress = {"phase": phase, "current": current, "total": total, "message": message}
-                    if phase != last_scan_phase[0] or (current > 0 and (current == total or current % 5000 == 0)):
+                    if phase != last_scan_phase[0] or (current > 0 and (current == total or current % 1000 == 0)):
                         logger.info("scan progress upload_id=%s phase=%s current=%d total=%d message=%s", upload_id, phase, current, total, message)
                         _log_memory_checkpoint(f"scan-{phase}", upload_id=upload_id, current=current, total=total)
                         last_scan_phase[0] = phase
@@ -3041,7 +3073,7 @@ def create_app(
             }
             # Log phase transitions plus periodic large ownership steps without
             # flooding journald for every media item.
-            if phase != last_phase[0] or (total > 0 and current > 0 and (current == total or current % 5000 == 0)):
+            if phase != last_phase[0] or (total > 0 and current > 0 and (current == total or current % 1000 == 0)):
                 logger.info(
                     "stage progress session_id=%s phase=%s current=%d total=%d detail=%s elapsed=%.2fs",
                     session_id, phase, current, total, detail, time.monotonic() - stage_started,
