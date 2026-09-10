@@ -181,6 +181,7 @@ class ImportSession:
     workspace_cached_media_index: dict[str, object] = field(default_factory=dict)
     workspace_cached_media_owner: dict[str, str] = field(default_factory=dict)
     workspace_cache_builds: int = 0
+    workspace_ownership_dirty: bool = False
 
 
 @dataclass
@@ -916,6 +917,7 @@ def _workspace_invalidate_cache(session: ImportSession) -> None:
     session.workspace_cached_folder_media.clear()
     session.workspace_cached_media_index.clear()
     session.workspace_cached_media_owner.clear()
+    session.workspace_ownership_dirty = False
 
 
 def _workspace_ensure_cache(session: ImportSession) -> None:
@@ -952,6 +954,7 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
     session.workspace_cached_folder_media = by_folder
     session.workspace_cached_media_index = media_index
     session.workspace_cached_media_owner = owner_by_media
+    session.workspace_ownership_dirty = False
     session.workspace_cache_signature = signature
     session.workspace_cache_builds += 1
     logger.info(
@@ -962,6 +965,12 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
         "workspace-cache-complete", cache_build=session.workspace_cache_builds,
         nodes=len(tree), media=len(media_items), owners=len(owner_by_media), folders=len(by_folder),
     )
+
+
+def _workspace_ensure_authoritative_cache(session: ImportSession) -> None:
+    if session.workspace_ownership_dirty:
+        _workspace_invalidate_cache(session)
+    _workspace_ensure_cache(session)
 
 
 def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> list[dict[str, object]]:
@@ -1139,6 +1148,24 @@ def _workspace_media_for_folder_base(session: ImportSession, folder_key: str) ->
 
 def _workspace_media_for_folder(session: ImportSession, folder_key: str) -> list[object]:
     _workspace_ensure_cache(session)
+    if session.workspace_ownership_dirty:
+        # Classification-only edits deliberately defer the expensive global
+        # ownership rebuild. For the selected folder, derive a local view from
+        # its scanner-seeded media plus explicit user moves. This keeps role
+        # changes and navigation responsive even for very large comics.
+        media_index = session.workspace_cached_media_index
+        local_paths = {str(item.path) for item in _workspace_media_for_folder_base(session, folder_key)}
+        local_paths.update(path for path, target in session.workspace_media_targets.items() if target == folder_key)
+        visible = []
+        for path in local_paths:
+            target = session.workspace_media_targets.get(path)
+            if target is not None and target != folder_key:
+                continue
+            item = media_index.get(path)
+            if item is not None:
+                visible.append(item)
+        visible.sort(key=lambda item: getattr(item, "order", 0))
+        return visible
     return [
         session.workspace_cached_media_index[path]
         for path in session.workspace_cached_folder_media.get(folder_key, [])
@@ -1187,6 +1214,7 @@ def _workspace_build_staged_import(
     session: ImportSession,
     progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> StagedImport:
+    _workspace_ensure_authoritative_cache(session)
     def report(phase: str, current: int, total: int, detail: str) -> None:
         if progress_callback is not None:
             progress_callback(phase, current, total, detail)
@@ -2679,6 +2707,15 @@ def create_app(
         selected = requested if any(node["path"] == requested for node in tree) else str(tree[0]["path"])
         selected_node = next(node for node in tree if node["path"] == selected)
         media = _workspace_media_for_folder(session, selected)
+        media_total = len(media)
+        try:
+            media_offset = max(0, int(request.query_params.get("media_offset", "0")))
+        except ValueError:
+            media_offset = 0
+        media_page_size = 250
+        if media_offset >= media_total and media_total:
+            media_offset = max(0, ((media_total - 1) // media_page_size) * media_page_size)
+        media_page = media[media_offset:media_offset + media_page_size]
         media_targets = _workspace_media_targets_for_folder(session, selected)
         return templates.TemplateResponse(
             request=request,
@@ -2689,7 +2726,10 @@ def create_app(
                 "tree": tree,
                 "selected": selected,
                 "selected_node": selected_node,
-                "selected_media": media,
+                "selected_media": media_page,
+                "selected_media_total": media_total,
+                "selected_media_offset": media_offset,
+                "selected_media_page_size": media_page_size,
                 "selected_metadata": _workspace_node_metadata(session, selected_node),
                 "media_targets": media_targets,
                 "media_target_paths": {path for path, _ in media_targets},
@@ -3127,6 +3167,8 @@ def create_app(
                 context={
                     "session_id": session_id, "plan": session.plan, "tree": tree, "selected": selected,
                     "selected_node": selected_node, "selected_media": _workspace_media_for_folder(session, selected),
+                    "selected_media_total": len(_workspace_media_for_folder(session, selected)),
+                    "selected_media_offset": 0, "selected_media_page_size": 250,
                     "selected_metadata": _workspace_node_metadata(session, selected_node),
                     "media_targets": _workspace_media_targets_for_folder(session, selected),
                     "author_value": session.workspace_author or "", "series_value": session.workspace_series or "",
@@ -3160,6 +3202,17 @@ def create_app(
         if node["is_root"] and new_role not in {"Series", "Issue", "Container", "Ignore"}:
             raise HTTPException(status_code=400, detail="The upload root can be a Series, Issue, Container, or Ignore")
         session.workspace_role_overrides[folder_key] = new_role
+        # Role changes alter semantic ownership, but rebuilding ownership for the
+        # entire comic here makes a single dropdown change scale with every media
+        # file. Patch the cached tree immediately and defer the authoritative
+        # ownership rebuild until validation or another ownership-sensitive step.
+        if session.workspace_cached_tree is not None:
+            for cached_node in session.workspace_cached_tree:
+                if str(cached_node["path"]) == folder_key:
+                    cached_node["role"] = new_role
+                    break
+            session.workspace_cache_signature = _workspace_cache_state_signature(session)
+            session.workspace_ownership_dirty = True
         # Preserve the old virtual-group owner field for recovered older sessions.
         if folder_key.startswith("virtual:") and new_role == "Issue-Extras":
             group = session.workspace_virtual_groups.get(folder_key.split(":",1)[1])

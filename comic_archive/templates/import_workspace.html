@@ -77,7 +77,7 @@
     <div class="workspace-panel-heading">
       <div>
         <h2>{{ selected_node.name }}/</h2>
-        <div class="muted">{{ selected_node.role }} · {{ selected_media|length }} page{% if selected_media|length != 1 %}s{% endif %} currently assigned</div>
+        <div class="muted">{{ selected_node.role }} · {{ selected_media_total }} page{% if selected_media_total != 1 %}s{% endif %} currently assigned</div>
       </div>
     </div>
 
@@ -107,6 +107,13 @@
     {% endif %}
 
     {% if selected_media %}
+      {% if selected_media_total > selected_media_page_size %}
+      <p class="muted">Showing {{ selected_media_offset + 1 }}–{{ [selected_media_offset + selected_media|length, selected_media_total]|min }} of {{ selected_media_total }} pages. Large folders are paged to keep the workspace responsive.</p>
+      <div class="inline-controls">
+        {% if selected_media_offset > 0 %}<a href="/import/{{ session_id }}/review?folder={{ selected|urlencode }}&media_offset={{ [0, selected_media_offset - selected_media_page_size]|max }}">Previous pages</a>{% endif %}
+        {% if selected_media_offset + selected_media_page_size < selected_media_total %}<a href="/import/{{ session_id }}/review?folder={{ selected|urlencode }}&media_offset={{ selected_media_offset + selected_media_page_size }}">Next pages</a>{% endif %}
+      </div>
+      {% endif %}
       <p class="muted">Drag pages to change reading order. Click a page to select it; Ctrl/Cmd-click selects multiple pages, then drag the selection onto the main issue or an extras folder in the tree.</p>
       <div class="inline-controls workspace-file-actions"><button type="button" id="ignore-selected-button">Ignore selected</button><button type="button" id="restore-selected-button">Restore selected</button></div>
       <div id="workspace-media" class="workspace-media-list" data-folder="{{ selected }}">

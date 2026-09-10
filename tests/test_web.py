@@ -3211,3 +3211,69 @@ def test_workspace_finalize_exposes_descriptive_staging_progress(tmp_path: Path)
     progress = client.get(f"/import/{session_id}/staging-progress").json()
     assert progress["phase"] == "complete"
     assert progress["detail"] == "Validation complete"
+
+
+def test_large_workspace_role_change_defers_global_ownership_rebuild_and_pages_media(tmp_path: Path):
+    source = tmp_path / "incoming" / "Large Comic"
+    chapter = source / "Chapter 1"
+    chapter.mkdir(parents=True, exist_ok=True)
+    for index in range(600):
+        (chapter / f"{index + 1:04d}.jpg").write_bytes(b"page")
+
+    client = _admin_client(tmp_path / "archive.sqlite3", tmp_path / "library")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+
+    first = client.get(response.headers["location"] + "?folder=Chapter%201")
+    assert first.status_code == 200
+    session = client.app.state.import_sessions[session_id]
+    assert session.workspace_cache_builds == 1
+    assert first.text.count('class="workspace-media-row') == 250
+    assert "Showing 1–250 of 600 pages" in first.text
+    assert "Next pages" in first.text
+
+    changed = _post(
+        client,
+        f"/import/{session_id}/workspace/role",
+        data={"folder_path": "Chapter 1", "role": "issue"},
+        follow_redirects=False,
+    )
+    assert changed.status_code == 303
+    assert session.workspace_cache_builds == 1
+    assert session.workspace_ownership_dirty is True
+
+    updated = client.get(changed.headers["location"])
+    assert updated.status_code == 200
+    assert session.workspace_cache_builds == 1
+    assert updated.text.count('class="workspace-media-row') == 250
+    assert "Showing 1–250 of 600 pages" in updated.text
+    assert "Issue" in updated.text
+
+
+def test_deferred_workspace_ownership_rebuilds_before_staging(tmp_path: Path):
+    from comic_archive.web import ImportSession, _workspace_build_staged_import, _workspace_tree
+
+    source = tmp_path / "Comic"
+    chapter = source / "Chapter 1"
+    chapter.mkdir(parents=True)
+    for index in range(20):
+        (chapter / f"{index + 1:03d}.jpg").write_bytes(b"page")
+
+    session = ImportSession(plan=build_review_plan(scan_folder(source)), author_default="Artist", series_default="Comic")
+    tree = _workspace_tree(session)
+    chapter_key = next(str(node["path"]) for node in tree if node["name"] == "Chapter 1")
+    session.workspace_role_overrides[chapter_key] = "Issue"
+    # Simulate the fast role route's cached-tree patch/deferred ownership state.
+    for node in session.workspace_cached_tree or []:
+        if str(node["path"]) == chapter_key:
+            node["role"] = "Issue"
+            break
+    from comic_archive.web import _workspace_cache_state_signature
+    session.workspace_cache_signature = _workspace_cache_state_signature(session)
+    session.workspace_ownership_dirty = True
+    builds_before = session.workspace_cache_builds
+
+    staged = _workspace_build_staged_import(session)
+    assert session.workspace_cache_builds == builds_before + 1
+    assert session.workspace_ownership_dirty is False
+    assert sum(len(group.media) for issue in staged.issues for group in issue.groups) == 20
