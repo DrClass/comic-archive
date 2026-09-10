@@ -361,3 +361,35 @@ def test_loose_cover_does_not_flatten_issue_folders(tmp_path: Path):
     assert len(scan.extras) == 1
     assert scan.extras[0].name == "Series extras"
     assert [item.relative_path.as_posix() for item in scan.extras[0].media] == ["cover.png"]
+
+
+def test_scan_uses_single_pass_index_without_recursive_rglob(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "Indexed Comic"
+    for issue in range(1, 8):
+        for page in range(1, 6):
+            touch(source / f"Issue {issue}" / f"{page:03}.jpg")
+    touch(source / "Issue 1" / "Extras" / "bonus.png")
+
+    def fail_rglob(*args, **kwargs):
+        raise AssertionError("normal scan must not recursively rglob subtrees")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+    result = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+    assert result.is_series_candidate
+    assert len(result.issues) == 7
+
+
+def test_scan_progress_reports_index_and_completion(tmp_path: Path) -> None:
+    source = tmp_path / "Progress Comic"
+    touch(source / "001.jpg")
+    events = []
+
+    scan_folder(
+        source,
+        pdf_cache_root=tmp_path / "pdf-cache",
+        progress=lambda phase, current, total, message: events.append((phase, current, total, message)),
+    )
+
+    assert events[0][0] == "indexing"
+    assert any(event[0] == "classifying" for event in events)
+    assert events[-1][0] == "complete"

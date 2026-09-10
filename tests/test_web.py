@@ -1912,12 +1912,69 @@ def _create_browser_upload(client: TestClient, *, mode: str, expected_files: int
 def _send_browser_upload_file(client: TestClient, upload_id: str, relative_path: str, content: bytes):
     return client.post(
         f"/import/upload-session/{upload_id}/file",
-        data={
-            "csrf_token": _multipart_csrf(client),
-            "relative_path": relative_path,
+        params={"relative_path": relative_path},
+        headers={
+            "X-CSRF-Token": _multipart_csrf(client),
+            "X-File-Size": str(len(content)),
+            "Content-Type": "application/octet-stream",
         },
-        files={"file": (Path(relative_path).name, content, "application/octet-stream")},
+        content=content,
     )
+
+
+
+
+def test_resumable_file_endpoint_does_not_use_multipart_form_parser(tmp_path: Path, monkeypatch):
+    from starlette.requests import Request as StarletteRequest
+
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+    upload_id = _create_browser_upload(client, mode="single", expected_files=1)
+
+    async def fail_form(*args, **kwargs):
+        raise AssertionError("resumable file endpoint must not call request.form()")
+
+    monkeypatch.setattr(StarletteRequest, "form", fail_form)
+    response = _send_browser_upload_file(client, upload_id, "Raw Stream/001.jpg", b"page")
+    assert response.status_code == 200, response.text
+
+
+def test_resumable_upload_rejects_incomplete_raw_body(tmp_path: Path):
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    upload_id = _create_browser_upload(client, mode="single", expected_files=1)
+    response = client.post(
+        f"/import/upload-session/{upload_id}/file",
+        params={"relative_path": "Broken/001.jpg"},
+        headers={
+            "X-CSRF-Token": _multipart_csrf(client),
+            "X-File-Size": "10",
+            "Content-Type": "application/octet-stream",
+        },
+        content=b"short",
+    )
+    assert response.status_code == 400
+    assert "Incomplete upload body" in response.text
+    root = client.app.state.upload_sessions[upload_id].upload_root
+    assert not (root / "content" / "Broken" / "001.jpg.part").exists()
+
+
+def test_upload_status_reports_scan_progress(tmp_path: Path):
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+    upload_id = _create_browser_upload(client, mode="single", expected_files=1)
+    upload = client.app.state.upload_sessions[upload_id]
+    upload.scan_progress = {"phase": "indexing", "current": 25, "total": 100, "message": "Indexing filesystem"}
+    response = client.get(f"/import/upload-session/{upload_id}/status")
+    assert response.status_code == 200
+    assert response.json()["scan"]["phase"] == "indexing"
 
 
 def test_resumable_upload_session_accepts_files_individually_and_finalizes(tmp_path: Path):
@@ -2100,6 +2157,9 @@ def test_import_pages_use_resumable_file_by_file_upload_ui(tmp_path: Path):
         assert "concurrency = 3" in response.text
         assert "maxAttempts = 3" in response.text
         assert "Resume upload" in response.text
+        assert "X-File-Size" in response.text
+        assert "application/octet-stream" in response.text
+        assert "/status" in response.text
         assert "/file" in response.text
         assert "/finalize" in response.text
 

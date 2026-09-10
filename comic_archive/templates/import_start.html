@@ -60,7 +60,19 @@
   const maxAttempts = 3;
   let uploadId = null;
   let completed = new Set();
+  let completedBytes = 0;
   let uploading = false;
+
+  function formatBytes(bytes) {
+    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${bytes} B`;
+  }
+
+  function totalSelectedBytes() {
+    return Array.from(picker.files).reduce((sum, file) => sum + file.size, 0);
+  }
 
   function relativePath(file) {
     return file.webkitRelativePath || file.name;
@@ -96,11 +108,13 @@
     }
     uploadId = null;
     completed = new Set();
+    completedBytes = 0;
   }
 
   picker.addEventListener('change', async () => {
     if (uploadId && !uploading) await cancelCurrentUpload();
     completed = new Set();
+    completedBytes = 0;
     progress.value = 0;
     progress.hidden = true;
     updateSelectionStatus();
@@ -142,24 +156,30 @@
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (!uploading) throw new Error('Upload cancelled');
-      const data = new FormData();
-      data.append('csrf_token', csrf);
-      data.append('relative_path', rel);
-      data.append('file', file, file.name);
       try {
-        const response = await fetch(`/import/upload-session/${uploadId}/file`, {
+        const response = await fetch(`/import/upload-session/${uploadId}/file?relative_path=${encodeURIComponent(rel)}`, {
           method: 'POST',
-          body: data
+          headers: {
+            'X-CSRF-Token': csrf,
+            'X-File-Size': String(file.size),
+            'Content-Type': 'application/octet-stream'
+          },
+          body: file
         });
-        if (!response.ok) throw new Error(await response.text());
+        if (!response.ok) {
+          const detail = await response.text();
+          throw new Error(`HTTP ${response.status} uploading ${rel}: ${detail}`);
+        }
         completed.add(rel);
-        progress.value = Math.round((completed.size / picker.files.length) * 100);
-        status.textContent = `Uploading… ${completed.size} of ${picker.files.length} files (${progress.value}%)`;
+        completedBytes += file.size;
+        progress.value = Math.round((completedBytes / Math.max(1, totalSelectedBytes())) * 100);
+        status.textContent = `Uploading… ${completed.size} of ${picker.files.length} files · ${formatBytes(completedBytes)} of ${formatBytes(totalSelectedBytes())} (${progress.value}%)`;
         return;
       } catch (error) {
         lastError = error;
+        console.warn('Comic Archive upload attempt failed', {path: rel, size: file.size, attempt, error});
         if (attempt < maxAttempts) {
-          status.textContent = `Retrying ${rel} · attempt ${attempt + 1} of ${maxAttempts}`;
+          status.textContent = `Retrying ${rel} · attempt ${attempt + 1} of ${maxAttempts}: ${error.message || error}`;
           await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, attempt - 1)));
         }
       }
@@ -191,14 +211,40 @@
 
   async function finalizeUpload() {
     const body = new URLSearchParams({csrf_token: csrf});
-    const response = await fetch(`/import/upload-session/${uploadId}/finalize`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body
-    });
-    const data = await response.json().catch(() => ({error: 'The server returned an invalid response.'}));
-    if (!response.ok) throw new Error(data.error || 'Unable to finalize upload.');
-    window.location.assign(data.redirect);
+    let polling = true;
+    const pollProgress = async () => {
+      while (polling) {
+        try {
+          const response = await fetch(`/import/upload-session/${uploadId}/status`, {cache: 'no-store'});
+          if (response.ok) {
+            const data = await response.json();
+            const scan = data.scan || {};
+            if (scan.message) {
+              let suffix = '';
+              if (scan.total > 0) suffix = ` (${scan.current} / ${scan.total})`;
+              status.textContent = `${scan.message}${suffix}`;
+            }
+          }
+        } catch (error) {
+          console.debug('Comic Archive scan progress poll failed', error);
+        }
+        await new Promise(resolve => setTimeout(resolve, 750));
+      }
+    };
+    const pollPromise = pollProgress();
+    try {
+      const response = await fetch(`/import/upload-session/${uploadId}/finalize`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body
+      });
+      const data = await response.json().catch(() => ({error: 'The server returned an invalid response.'}));
+      if (!response.ok) throw new Error(data.error || `Unable to finalize upload (HTTP ${response.status}).`);
+      window.location.assign(data.redirect);
+    } finally {
+      polling = false;
+      await pollPromise;
+    }
   }
 
   form.addEventListener('submit', async (event) => {
@@ -213,7 +259,7 @@
     picker.disabled = true;
     cancel.hidden = false;
     progress.hidden = false;
-    progress.value = Math.round((completed.size / picker.files.length) * 100);
+    progress.value = Math.round((completedBytes / Math.max(1, totalSelectedBytes())) * 100);
 
     try {
       if (!uploadId) await createSession();
@@ -225,7 +271,10 @@
         uploading = false;
         button.disabled = false;
         picker.disabled = false;
-        status.textContent = `${failures.length} file${failures.length === 1 ? '' : 's'} failed after retries. Click Resume upload to retry only the remaining files.`;
+        const first = failures[0];
+        const detail = first && first.error ? (first.error.message || String(first.error)) : 'Unknown error';
+        console.error('Comic Archive upload failures', failures.map(item => ({path: relativePath(item.file), size: item.file.size, error: item.error})));
+        status.textContent = `${failures.length} file${failures.length === 1 ? '' : 's'} failed after retries. First failure: ${detail}. Click Resume upload to retry only the remaining files.`;
         button.textContent = 'Resume upload';
         return;
       }

@@ -668,3 +668,11 @@ Scanner hardening added two default guesses: a folder containing multiple PDFs a
 - Scanner-seeded logical PDF issue nodes now retain ownership of their rendered pages.
 - Added regression coverage for renaming/renumbering PDF issues.
 - Test suite: 164 passed.
+
+## Milestone 41 — streaming uploads and indexed scans
+
+The primary resumable browser uploader now sends each file as a raw request body and streams it directly to disk instead of parsing the file through multipart form handling. This keeps upload memory bounded, validates the declared file size, preserves restart-safe upload sessions, and reports both byte and file-count progress.
+
+Folder scans now build a single filesystem/media index and perform subsequent structure classification from that index rather than recursively re-walking media-bearing subtrees. Browser-upload finalization performs scan work outside the ASGI event loop and exposes scan status to the upload page while it runs.
+
+Server logs now report upload counts/bytes/RSS, scan phases and timings, indexed file/folder counts, PDF-render progress, and detailed upload failures to make production diagnostics substantially easier.

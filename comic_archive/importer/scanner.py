@@ -4,6 +4,11 @@ import mimetypes
 import re
 import tempfile
 import hashlib
+import logging
+import os
+import time
+from dataclasses import dataclass
+from typing import Callable
 from pathlib import Path
 
 from .models import (
@@ -53,6 +58,80 @@ class FolderScanError(ValueError):
     pass
 
 
+logger = logging.getLogger("comic_archive.scanner")
+ScanProgress = Callable[[str, int, int, str], None]
+
+
+@dataclass
+class ScanIndex:
+    source: Path
+    direct_supported: dict[Path, list[Path]]
+    child_dirs: dict[Path, list[Path]]
+    media_dirs: set[Path]
+    ignored: list[Path]
+    file_count: int
+    supported_count: int
+    directory_count: int
+
+    def has_media(self, directory: Path) -> bool:
+        return directory.resolve() in self.media_dirs
+
+    def files(self, directory: Path) -> list[Path]:
+        return self.direct_supported.get(directory.resolve(), [])
+
+    def dirs(self, directory: Path) -> list[Path]:
+        return self.child_dirs.get(directory.resolve(), [])
+
+
+def _build_scan_index(source: Path, progress: ScanProgress | None = None) -> ScanIndex:
+    started = time.monotonic()
+    direct_supported: dict[Path, list[Path]] = {}
+    child_dirs: dict[Path, list[Path]] = {}
+    media_dirs: set[Path] = set()
+    ignored: list[Path] = []
+    file_count = 0
+    supported_count = 0
+    directory_count = 0
+
+    if progress:
+        progress("indexing", 0, 0, "Indexing filesystem")
+    for root_text, dir_names, file_names in os.walk(source):
+        root = Path(root_text).resolve()
+        directory_count += 1
+        dirs = [root / name for name in dir_names]
+        child_dirs[root] = dirs
+        supported_here: list[Path] = []
+        for name in file_names:
+            path = root / name
+            file_count += 1
+            if not _is_ignored(path) and _media_info(path) is not None:
+                supported_here.append(path)
+                supported_count += 1
+                current = root
+                while True:
+                    media_dirs.add(current)
+                    if current == source:
+                        break
+                    try:
+                        current = current.parent
+                    except Exception:
+                        break
+            else:
+                ignored.append(path)
+        direct_supported[root] = supported_here
+        if progress and directory_count % 250 == 0:
+            progress("indexing", file_count, 0, f"Indexed {file_count:,} files in {directory_count:,} folders")
+
+    elapsed = time.monotonic() - started
+    logger.info(
+        "scan index complete source=%s files=%d supported=%d dirs=%d ignored=%d elapsed=%.2fs",
+        source, file_count, supported_count, directory_count, len(ignored), elapsed,
+    )
+    if progress:
+        progress("indexing", file_count, file_count, f"Indexed {file_count:,} files in {directory_count:,} folders")
+    return ScanIndex(source, direct_supported, child_dirs, media_dirs, ignored, file_count, supported_count, directory_count)
+
+
 def _is_ignored(path: Path) -> bool:
     return path.name.casefold() in IGNORED_FILENAMES or path.name.startswith("._")
 
@@ -70,11 +149,22 @@ def _media_info(path: Path) -> tuple[MediaKind, str] | None:
     return None
 
 
-def _contains_supported_media(directory: Path) -> bool:
-    return any(
-        child.is_file() and not _is_ignored(child) and _media_info(child)
-        for child in directory.rglob("*")
-    )
+def _contains_supported_media(directory: Path, index: ScanIndex | None = None) -> bool:
+    if index is not None:
+        return index.has_media(directory)
+    return any(child.is_file() and not _is_ignored(child) and _media_info(child) for child in directory.rglob("*"))
+
+
+def _direct_supported_files(directory: Path, index: ScanIndex | None = None) -> list[Path]:
+    if index is not None:
+        return list(index.files(directory))
+    return [child for child in directory.iterdir() if child.is_file() and not _is_ignored(child) and _media_info(child)]
+
+
+def _direct_child_dirs(directory: Path, index: ScanIndex | None = None) -> list[Path]:
+    if index is not None:
+        return list(index.dirs(directory))
+    return [child for child in directory.iterdir() if child.is_dir()]
 
 
 def _normalize_hint_paths(source: Path, values: list[str | Path] | None) -> set[Path]:
@@ -113,6 +203,7 @@ def _find_content_root(
     extra_overrides: set[Path] | None = None,
     primary_overrides: set[Path] | None = None,
     structural_overrides: set[Path] | None = None,
+    index: ScanIndex | None = None,
 ) -> Path:
     """Collapse harmless single-directory wrappers around an import.
 
@@ -123,18 +214,14 @@ def _find_content_root(
     current = source
 
     while True:
-        direct_media = [
-            child
-            for child in current.iterdir()
-            if child.is_file() and not _is_ignored(child) and _media_info(child)
-        ]
+        direct_media = _direct_supported_files(current, index)
         if direct_media:
             return current
 
         all_media_children = [
             child
-            for child in current.iterdir()
-            if child.is_dir() and _contains_supported_media(child)
+            for child in _direct_child_dirs(current, index)
+            if _contains_supported_media(child, index)
         ]
         media_children = [
             child
@@ -174,6 +261,8 @@ def _render_pdf_pages(pdf_path: Path, relative_to: Path, pdf_cache_root: Path) -
         with fitz.open(pdf_path) as document:
             if document.page_count < 1:
                 raise FolderScanError(f"PDF has no pages: {pdf_path}")
+            render_started = time.monotonic()
+            logger.info("pdf render started file=%s pages=%d", pdf_path, document.page_count)
             width = max(4, len(str(document.page_count)))
             for page_index in range(document.page_count):
                 name = f"{page_index + 1:0{width}d}.png"
@@ -183,6 +272,11 @@ def _render_pdf_pages(pdf_path: Path, relative_to: Path, pdf_cache_root: Path) -
                     pixmap = page.get_pixmap(dpi=150, alpha=False)
                     pixmap.save(destination)
                 rendered.append((destination, display_dir / name, MediaKind.IMAGE, "image/png"))
+                if (page_index + 1) % 25 == 0 or page_index + 1 == document.page_count:
+                    logger.info(
+                        "pdf render progress file=%s page=%d/%d elapsed=%.2fs",
+                        pdf_path, page_index + 1, document.page_count, time.monotonic() - render_started,
+                    )
     except FolderScanError:
         raise
     except Exception as exc:
@@ -217,7 +311,7 @@ def _scan_media(files: list[Path], relative_to: Path, pdf_cache_root: Path) -> l
     ]
 
 
-def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path) -> list[ScannedGroup]:
+def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path, index: ScanIndex | None = None) -> list[ScannedGroup]:
     """Scan extra content while preserving folders as distinct named groups.
 
     An extra container such as ``Extras/`` may itself contain several separately
@@ -227,10 +321,7 @@ def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path)
     """
     groups: list[ScannedGroup] = []
 
-    direct_files = [
-        child for child in directory.iterdir()
-        if child.is_file() and not _is_ignored(child) and _media_info(child)
-    ]
+    direct_files = _direct_supported_files(directory, index)
     direct_media = _scan_media(direct_files, directory, pdf_cache_root)
     if direct_media:
         groups.append(
@@ -243,11 +334,11 @@ def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path)
         )
 
     child_dirs = [
-        child for child in directory.iterdir()
-        if child.is_dir() and _contains_supported_media(child)
+        child for child in _direct_child_dirs(directory, index)
+        if _contains_supported_media(child, index)
     ]
     for child in sorted(child_dirs, key=lambda p: natural_path_key(p.relative_to(directory))):
-        groups.extend(_scan_extra_groups(child, relative_to, pdf_cache_root))
+        groups.extend(_scan_extra_groups(child, relative_to, pdf_cache_root, index))
 
     return groups
 
@@ -266,6 +357,7 @@ def _scan_single_issue(
     primary_overrides: set[Path] | None = None,
     separate_child_folders: bool = False,
     pdf_cache_root: Path,
+    index: ScanIndex | None = None,
 ) -> tuple[ScannedGroup | None, list[ScannedGroup]]:
     """Scan one issue while preserving meaningful child folders as groups.
 
@@ -275,10 +367,7 @@ def _scan_single_issue(
     silently flattened into primary content. Conventional page containers such
     as ``Pages``/``Images`` and explicit primary overrides remain primary.
     """
-    direct_files = [
-        child for child in directory.iterdir()
-        if child.is_file() and not _is_ignored(child) and _media_info(child)
-    ]
+    direct_files = _direct_supported_files(directory, index)
     primary_nested_files: list[Path] = []
     extra_dirs: list[Path] = []
     has_direct_primary = bool(direct_files)
@@ -289,7 +378,7 @@ def _scan_single_issue(
                 if not _is_ignored(child) and _media_info(child):
                     primary_nested_files.append(child)
                 continue
-            if not child.is_dir() or not _contains_supported_media(child):
+            if not child.is_dir() or not _contains_supported_media(child, index):
                 continue
 
             resolved = child.resolve()
@@ -315,7 +404,7 @@ def _scan_single_issue(
                 walk_container(child)
 
     for child in directory.iterdir():
-        if not child.is_dir() or not _contains_supported_media(child):
+        if not child.is_dir() or not _contains_supported_media(child, index):
             continue
         resolved = child.resolve()
         explicitly_primary = bool(primary_overrides and resolved in primary_overrides)
@@ -351,7 +440,7 @@ def _scan_single_issue(
         if resolved in seen:
             continue
         seen.add(resolved)
-        extras.extend(_scan_extra_groups(child, relative_to, pdf_cache_root))
+        extras.extend(_scan_extra_groups(child, relative_to, pdf_cache_root, index))
     return primary, extras
 
 
@@ -360,12 +449,13 @@ def _candidate_series_children(
     *,
     extra_overrides: set[Path] | None = None,
     primary_overrides: set[Path] | None = None,
+    index: ScanIndex | None = None,
 ) -> tuple[list[Path], list[Path]]:
     """Split media-bearing child folders into issue-like and series-extra candidates."""
     issue_dirs: list[Path] = []
     extra_dirs: list[Path] = []
     for child in content_root.iterdir():
-        if not child.is_dir() or not _contains_supported_media(child):
+        if not child.is_dir() or not _contains_supported_media(child, index):
             continue
         if _looks_like_extra(
             child,
@@ -391,6 +481,7 @@ def scan_folder(
     primary_folders: list[str | Path] | None = None,
     subseries_folders: list[str | Path] | None = None,
     pdf_cache_root: str | Path | None = None,
+    progress: ScanProgress | None = None,
 ) -> ScannedImport:
     source = Path(source).expanduser().resolve()
     if pdf_cache_root is None:
@@ -402,6 +493,14 @@ def scan_folder(
         raise FolderScanError(f"Folder does not exist: {source}")
     if not source.is_dir():
         raise FolderScanError(f"Source is not a folder: {source}")
+
+    scan_started = time.monotonic()
+    logger.info("scan started source=%s pdf_cache=%s", source, pdf_cache_root)
+    index = _build_scan_index(source, progress)
+    if index.supported_count == 0:
+        logger.warning("scan source contains no supported media source=%s files=%d dirs=%d", source, index.file_count, index.directory_count)
+    if progress:
+        progress("classifying", 0, index.directory_count, "Classifying folders and issues")
 
     extra_overrides = _normalize_hint_paths(source, extra_folders)
     primary_overrides = _normalize_hint_paths(source, primary_folders)
@@ -416,15 +515,14 @@ def scan_folder(
         extra_overrides=extra_overrides,
         primary_overrides=primary_overrides,
         structural_overrides=subseries_overrides,
+        index=index,
     )
-    direct_media_files = [
-        child for child in content_root.iterdir()
-        if child.is_file() and not _is_ignored(child) and _media_info(child)
-    ]
+    direct_media_files = _direct_supported_files(content_root, index)
     issue_dirs, series_extra_dirs = _candidate_series_children(
         content_root,
         extra_overrides=extra_overrides,
         primary_overrides=primary_overrides,
+        index=index,
     )
 
     # Explicit sub-series hints force a series-shaped scan even when there is
@@ -447,14 +545,14 @@ def scan_folder(
 
     def scan_series_level(container: Path, series_path: Path) -> None:
         children = [
-            child for child in container.iterdir()
-            if child.is_dir() and _contains_supported_media(child)
+            child for child in _direct_child_dirs(container, index)
+            if _contains_supported_media(child, index)
         ]
         for child in sorted(children, key=lambda p: natural_path_key(p.relative_to(container))):
             child_rel_source = child.resolve()
             child_rel_content = child.relative_to(content_root)
             if _looks_like_extra(child, extra_overrides=extra_overrides, primary_overrides=primary_overrides):
-                for group in _scan_extra_groups(child, content_root, pdf_cache_root):
+                for group in _scan_extra_groups(child, content_root, pdf_cache_root, index):
                     group.series_path = series_path
                     extras.append(group)
                 continue
@@ -469,6 +567,7 @@ def scan_folder(
                 primary_overrides=primary_overrides,
                 separate_child_folders=True,
                 pdf_cache_root=pdf_cache_root,
+                index=index,
             )
             if issue_primary is not None:
                 issue_primary.series_path = series_path
@@ -511,15 +610,19 @@ def scan_folder(
             extra_overrides=extra_overrides,
             primary_overrides=primary_overrides,
             pdf_cache_root=pdf_cache_root,
+            index=index,
         )
     ignored_files = sorted(
-        (
-            path.relative_to(content_root)
-            for path in content_root.rglob("*")
-            if path.is_file() and (_is_ignored(path) or _media_info(path) is None)
-        ),
+        (path.relative_to(content_root) for path in index.ignored if content_root == path.parent or content_root in path.parents),
         key=natural_path_key,
     )
+    elapsed = time.monotonic() - scan_started
+    logger.info(
+        "scan complete source=%s content_root=%s series=%s issues=%d subseries=%d extras=%d supported=%d ignored=%d elapsed=%.2fs",
+        source, content_root, is_series, len(issues), len(subseries), len(extras), index.supported_count, len(ignored_files), elapsed,
+    )
+    if progress:
+        progress("complete", index.directory_count, index.directory_count, f"Scan complete: {index.supported_count:,} media files, {len(issues):,} issues")
 
     return ScannedImport(
         source=source,
