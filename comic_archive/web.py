@@ -30,14 +30,23 @@ from .importer.staging import (
     StagingError, build_staged_import, create_staged_issue_extra,
     move_staged_media, remove_empty_staged_group,
 )
-from .library import AuthorView, GroupView, IssueView, MediaView, SeriesView, read_library
+from .library import read_library
 from .editing import EditError, create_issue_extra_group, delete_series, edit_issue, edit_series, get_history, move_extra_group, move_media_to_group, rename_author, rename_group, reorder_issues, reorder_media, set_media_active
 from .thumbnails import THUMBNAIL_MIME, ensure_thumbnail
-from .progress import get_continue_reading, get_progress, get_progress_map, reset_progress, save_progress
 from .maintenance import build_maintenance_report, series_gaps, set_intentional_gap
 from .auth import get_or_create_session_secret, get_user, initialize_auth_database
 from .database import connect_database
 from .routes.auth import register_auth_routes
+from .routes.library import register_library_routes
+from .library_views import (
+    find_author as _find_author,
+    find_group as _find_group,
+    find_issue as _find_issue,
+    find_series as _find_series,
+    primary_group as _primary_group,
+    series_lineage as _series_lineage,
+    walk_series as _walk_series,
+)
 from .web_forms import form_data as _form_data, check_csrf_value as _check_csrf_value
 
 
@@ -194,141 +203,6 @@ class BulkArtistSession:
     skipped_series: list[str] = field(default_factory=list)
     upload_root: Path | None = None
     last_activity: float = field(default_factory=time.time)
-
-
-def _find_author(authors: Iterable[AuthorView], author_id: str) -> AuthorView | None:
-    return next((author for author in authors if author.id == author_id), None)
-
-
-def _walk_series(series_items: Iterable[SeriesView]):
-    for series in series_items:
-        yield series
-        yield from _walk_series(series.children)
-
-
-def _walk_issues(series: SeriesView):
-    yield from series.issues
-    for child in series.children:
-        yield from _walk_issues(child)
-
-
-def _find_series(authors: Iterable[AuthorView], series_id: str) -> tuple[AuthorView, SeriesView] | None:
-    for author in authors:
-        for series in _walk_series(author.series):
-            if series.id == series_id:
-                return author, series
-    return None
-
-
-def _find_issue(authors: Iterable[AuthorView], issue_id: str) -> tuple[AuthorView, SeriesView, IssueView] | None:
-    for author in authors:
-        for series in _walk_series(author.series):
-            for issue in series.issues:
-                if issue.id == issue_id:
-                    return author, series, issue
-    return None
-
-
-def _find_group(authors: Iterable[AuthorView], group_id: str) -> tuple[AuthorView, SeriesView, IssueView | None, GroupView] | None:
-    for author in authors:
-        for series in _walk_series(author.series):
-            for group in series.extras:
-                if group.id == group_id:
-                    return author, series, None, group
-            for issue in series.issues:
-                for group in issue.groups:
-                    if group.id == group_id:
-                        return author, series, issue, group
-    return None
-
-
-def _primary_group(issue: IssueView) -> GroupView | None:
-    return next((group for group in issue.groups if group.role == "primary"), None)
-
-
-def _first_image_media(issue: IssueView) -> MediaView | None:
-    primary = _primary_group(issue)
-    if primary is None:
-        return None
-    return next((media for media in primary.media if media.mime_type.startswith("image/")), None)
-
-
-def _issue_preview_map(series: SeriesView) -> dict[str, MediaView]:
-    previews: dict[str, MediaView] = {}
-    for issue in series.issues:
-        media = _first_image_media(issue)
-        if media is not None:
-            previews[issue.id] = media
-    return previews
-
-
-def _series_preview_map(author: AuthorView) -> dict[str, MediaView]:
-    previews: dict[str, MediaView] = {}
-
-    def first_preview(series: SeriesView) -> MediaView | None:
-        for issue in series.issues:
-            media = _first_image_media(issue)
-            if media is not None:
-                return media
-        for child in series.children:
-            media = first_preview(child)
-            if media is not None:
-                return media
-        return None
-
-    for series in _walk_series(author.series):
-        media = first_preview(series)
-        if media is not None:
-            previews[series.id] = media
-    return previews
-
-
-def _series_issue_ids(series: SeriesView) -> list[str]:
-    ids = [issue.id for issue in series.issues]
-    for child in series.children:
-        ids.extend(_series_issue_ids(child))
-    return ids
-
-
-def _series_reading_status(series: SeriesView, progress: dict[str, object]) -> str:
-    issue_ids = _series_issue_ids(series)
-    if not issue_ids:
-        return "unread"
-    saved = [progress.get(issue_id) for issue_id in issue_ids]
-    if all(item is not None and item.completed for item in saved):
-        return "finished"
-    if all(item is None for item in saved):
-        return "unread"
-    return "in-progress"
-
-
-def _series_status_map(author: AuthorView, progress: dict[str, object]) -> dict[str, str]:
-    return {series.id: _series_reading_status(series, progress) for series in _walk_series(author.series)}
-
-
-def _author_preview_map(authors: list[AuthorView]) -> dict[str, MediaView]:
-    previews: dict[str, MediaView] = {}
-    for author in authors:
-        series_previews = _series_preview_map(author)
-        for series in author.series:
-            media = series_previews.get(series.id)
-            if media is not None:
-                previews[author.id] = media
-                break
-    return previews
-
-
-def _series_lineage(author: AuthorView, series: SeriesView) -> list[SeriesView]:
-    by_id = {item.id: item for item in _walk_series(author.series)}
-    lineage: list[SeriesView] = []
-    current = series
-    seen: set[str] = set()
-    while current.parent_series_id and current.parent_series_id in by_id and current.id not in seen:
-        seen.add(current.id)
-        current = by_id[current.parent_series_id]
-        lineage.append(current)
-    lineage.reverse()
-    return lineage
 
 
 def _media_record(database: Path, media_id: str) -> tuple[str, str] | None:
@@ -1952,117 +1826,6 @@ def _import_folder_listing(import_root: Path, relative_path: str) -> tuple[Path,
     return current, relative_text, folders, parent
 
 
-def _search_library(database: Path, query: str, *, limit: int = 100) -> list[dict[str, object]]:
-    query = query.strip()
-    if not query:
-        return []
-
-    pattern = f"%{query}%"
-    results: list[dict[str, object]] = []
-
-    with connect_database(database, row_factory=True) as db:
-
-        for row in db.execute(
-            """SELECT id, name
-               FROM authors
-               WHERE name LIKE ? COLLATE NOCASE
-               ORDER BY CASE WHEN name = ? COLLATE NOCASE THEN 0 ELSE 1 END,
-                        name COLLATE NOCASE
-               LIMIT ?""",
-            (pattern, query, limit),
-        ):
-            results.append({
-                "type": "Author",
-                "title": row["name"],
-                "context": None,
-                "url": f"/authors/{row['id']}",
-            })
-
-        for row in db.execute(
-            """SELECT s.id, s.title, a.name AS author_name
-               FROM series s
-               JOIN authors a ON a.id = s.author_id
-               WHERE s.title LIKE ? COLLATE NOCASE
-               ORDER BY CASE WHEN s.title = ? COLLATE NOCASE THEN 0 ELSE 1 END,
-                        a.name COLLATE NOCASE, s.title COLLATE NOCASE
-               LIMIT ?""",
-            (pattern, query, limit),
-        ):
-            results.append({
-                "type": "Series",
-                "title": row["title"],
-                "context": row["author_name"],
-                "url": f"/series/{row['id']}",
-            })
-
-        for row in db.execute(
-            """SELECT i.id, i.issue_number, i.title AS issue_title,
-                      s.title AS series_title, a.name AS author_name
-               FROM issues i
-               JOIN series s ON s.id = i.series_id
-               JOIN authors a ON a.id = s.author_id
-               WHERE COALESCE(i.issue_number, '') LIKE ? COLLATE NOCASE
-                  OR COALESCE(i.title, '') LIKE ? COLLATE NOCASE
-               ORDER BY a.name COLLATE NOCASE, s.title COLLATE NOCASE,
-                        COALESCE(i.issue_number, i.title, i.source_key) COLLATE NOCASE
-               LIMIT ?""",
-            (pattern, pattern, limit),
-        ):
-            if row["issue_number"]:
-                title = f"Issue {row['issue_number']}"
-                if row["issue_title"]:
-                    title += f" — {row['issue_title']}"
-            elif row["issue_title"]:
-                title = row["issue_title"]
-            else:
-                title = "One-shot"
-            results.append({
-                "type": "Issue",
-                "title": title,
-                "context": f"{row['author_name']} / {row['series_title']}",
-                "url": f"/issues/{row['id']}",
-            })
-
-        for row in db.execute(
-            """SELECT g.id, g.name, g.issue_id, g.role,
-                      s.title AS series_title, a.name AS author_name,
-                      i.issue_number, i.title AS issue_title
-               FROM content_groups g
-               JOIN series s ON s.id = g.series_id
-               JOIN authors a ON a.id = s.author_id
-               LEFT JOIN issues i ON i.id = g.issue_id
-               WHERE g.role != 'primary'
-                 AND g.name LIKE ? COLLATE NOCASE
-               ORDER BY a.name COLLATE NOCASE, s.title COLLATE NOCASE, g.name COLLATE NOCASE
-               LIMIT ?""",
-            (pattern, limit),
-        ):
-            context = f"{row['author_name']} / {row['series_title']}"
-            if row["issue_id"]:
-                issue_label = row["issue_number"] or row["issue_title"] or "One-shot"
-                context += f" / {issue_label}"
-            results.append({
-                "type": "Extra",
-                "title": row["name"],
-                "context": context,
-                "url": f"/groups/{row['id']}",
-            })
-
-    # Prefer exact title/name hits and then stable alphabetical-ish presentation,
-    # while keeping result types easy to scan.
-    qfold = query.casefold()
-    type_rank = {"Author": 0, "Series": 1, "Issue": 2, "Extra": 3}
-    results.sort(
-        key=lambda item: (
-            0 if str(item["title"]).casefold() == qfold else 1,
-            type_rank.get(str(item["type"]), 9),
-            str(item["title"]).casefold(),
-            str(item.get("context") or "").casefold(),
-        )
-    )
-    return results[:limit]
-
-
 def create_app(
     database_path: str | Path = "./comic_archive.sqlite3",
     library_root: str | Path = "./library",
@@ -2162,22 +1925,7 @@ def create_app(
 
     register_auth_routes(app, templates, database)
 
-    @app.get("/", response_class=HTMLResponse)
-    def home(request: Request):
-        authors = read_library(database)
-        series_count = sum(author.total_series for author in authors)
-        issue_count = sum(series.total_issues for author in authors for series in author.series)
-        return templates.TemplateResponse(
-            request=request,
-            name="home.html",
-            context={
-                "authors": authors,
-                "series_count": series_count,
-                "issue_count": issue_count,
-                "author_previews": _author_preview_map(authors),
-                "continue_reading": get_continue_reading(database, request.state.user.id),
-            },
-        )
+    register_library_routes(app, templates, database)
 
     @app.post("/import/upload-session", response_class=JSONResponse)
     async def create_upload_session(request: Request):
@@ -3555,160 +3303,6 @@ def create_app(
         if not target.startswith("/"):
             target = f"/series/{series_id}"
         return RedirectResponse(target, status_code=303)
-
-    @app.get("/search", response_class=HTMLResponse)
-    def search_page(request: Request, q: str = ""):
-        query = q.strip()
-        results = _search_library(database, query) if query else []
-        return templates.TemplateResponse(
-            request=request,
-            name="search.html",
-            context={"query": query, "results": results},
-        )
-
-    @app.get("/authors/{author_id}", response_class=HTMLResponse)
-    def author_page(request: Request, author_id: str):
-        authors = read_library(database)
-        author = _find_author(authors, author_id)
-        if author is None:
-            raise HTTPException(status_code=404, detail="Author not found")
-        issue_ids = [issue.id for series in author.series for issue in _walk_issues(series)]
-        progress = get_progress_map(database, request.state.user.id, issue_ids)
-        return templates.TemplateResponse(
-            request=request,
-            name="author.html",
-            context={
-                "author": author,
-                "series_previews": _series_preview_map(author),
-                "series_status": _series_status_map(author, progress),
-            },
-        )
-
-    @app.get("/series/{series_id}", response_class=HTMLResponse)
-    def series_page(request: Request, series_id: str):
-        authors = read_library(database)
-        found = _find_series(authors, series_id)
-        if found is None:
-            raise HTTPException(status_code=404, detail="Series not found")
-        author, series = found
-        all_issue_ids = _series_issue_ids(series)
-        progress = get_progress_map(database, request.state.user.id, all_issue_ids)
-        return templates.TemplateResponse(
-            request=request,
-            name="series.html",
-            context={
-                "author": author,
-                "series": series,
-                "issue_previews": _issue_preview_map(series),
-                "series_previews": _series_preview_map(author),
-                "lineage": _series_lineage(author, series),
-                "progress": progress,
-                "series_status": _series_status_map(author, progress),
-                "missing_gaps": series_gaps(database, series.id),
-            },
-        )
-
-    @app.get("/issues/{issue_id}", response_class=HTMLResponse)
-    def issue_page(request: Request, issue_id: str):
-        authors = read_library(database)
-        found = _find_issue(authors, issue_id)
-        if found is None:
-            raise HTTPException(status_code=404, detail="Issue not found")
-        author, series, issue = found
-        return templates.TemplateResponse(
-            request=request,
-            name="issue.html",
-            context={
-                "author": author,
-                "series": series,
-                "lineage": _series_lineage(author, series),
-                "issue": issue,
-                "primary": _primary_group(issue),
-                "extras": [group for group in issue.groups if group.role != "primary"],
-                "reading_progress": get_progress(database, request.state.user.id, issue.id),
-            },
-        )
-
-    @app.get("/groups/{group_id}", response_class=HTMLResponse)
-    def group_page(request: Request, group_id: str):
-        authors = read_library(database)
-        found = _find_group(authors, group_id)
-        if found is None:
-            raise HTTPException(status_code=404, detail="Content group not found")
-        author, series, issue, group = found
-        if group.role == "primary" and issue is not None:
-            return RedirectResponse(f"/issues/{issue.id}", status_code=303)
-        return templates.TemplateResponse(
-            request=request,
-            name="group.html",
-            context={"author": author, "series": series, "issue": issue, "group": group},
-        )
-
-    def _reader_response(request: Request, *, author: AuthorView, series: SeriesView, issue: IssueView | None, group: GroupView, page: int):
-        if not group.media:
-            raise HTTPException(status_code=404, detail="Content group has no readable media")
-        page_index = max(0, min(page - 1, len(group.media) - 1))
-        if group.role != "primary":
-            back_url, back_label, reader_title = f"/groups/{group.id}", "Extra details", group.name
-        elif issue is None:
-            back_url, back_label, reader_title = f"/series/{series.id}", "Series details", group.name
-        else:
-            back_url, back_label = f"/issues/{issue.id}", "Issue details"
-            reader_title = issue.title or (f"Issue {issue.issue_number}" if issue.issue_number else series.title)
-        track_progress = issue is not None and group.role == "primary"
-        if track_progress:
-            save_progress(database, request.state.user.id, issue.id, page_index + 1, len(group.media))
-        return templates.TemplateResponse(
-            request=request,
-            name="reader.html",
-            context={
-                "author": author, "series": series, "issue": issue, "group": group,
-                "media": group.media, "page_index": page_index, "back_url": back_url,
-                "back_label": back_label, "reader_title": reader_title,
-                "track_progress": track_progress,
-            },
-        )
-
-    @app.get("/read/{issue_id}", response_class=HTMLResponse)
-    def reader(request: Request, issue_id: str, page: int | None = None):
-        authors = read_library(database)
-        found = _find_issue(authors, issue_id)
-        if found is None:
-            raise HTTPException(status_code=404, detail="Issue not found")
-        author, series, issue = found
-        group = _primary_group(issue)
-        if group is None:
-            raise HTTPException(status_code=404, detail="Issue has no readable primary media")
-        if page is None:
-            saved = get_progress(database, request.state.user.id, issue.id)
-            page = saved.page if saved is not None and not saved.completed else 1
-        return _reader_response(request, author=author, series=series, issue=issue, group=group, page=page)
-
-    @app.get("/read-group/{group_id}", response_class=HTMLResponse)
-    def group_reader(request: Request, group_id: str, page: int = 1):
-        authors = read_library(database)
-        found = _find_group(authors, group_id)
-        if found is None:
-            raise HTTPException(status_code=404, detail="Content group not found")
-        author, series, issue, group = found
-        return _reader_response(request, author=author, series=series, issue=issue, group=group, page=page)
-
-    @app.post("/progress/{issue_id}")
-    async def progress_save(request: Request, issue_id: str):
-        form = await _form_data(request)
-        try:
-            page = int(form.get("page", "1"))
-            total_pages = int(form.get("total_pages", "1"))
-            progress = save_progress(database, request.state.user.id, issue_id, page, total_pages)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"page": progress.page, "completed": progress.completed}
-
-    @app.post("/progress/{issue_id}/reset")
-    async def progress_reset(request: Request, issue_id: str):
-        await _form_data(request)
-        reset_progress(database, request.state.user.id, issue_id)
-        return RedirectResponse(f"/issues/{issue_id}", status_code=303)
 
     @app.get("/authors/{author_id}/edit", response_class=HTMLResponse)
     def author_edit_page(request: Request, author_id: str):
