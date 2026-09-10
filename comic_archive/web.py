@@ -83,6 +83,14 @@ class ImportSession:
     workspace_role_overrides: dict[str, str] = field(default_factory=dict)
     workspace_parent_overrides: dict[str, str] = field(default_factory=dict)
     workspace_ignored_media: set[str] = field(default_factory=set)
+    # Runtime virtual-workspace cache. The filesystem/scanner seeds this once;
+    # normal workspace reads operate from these indexes until an edit changes
+    # the lightweight workspace signature.
+    workspace_cache_signature: str | None = None
+    workspace_cached_tree: list[dict[str, object]] | None = None
+    workspace_cached_folder_media: dict[str, list[str]] = field(default_factory=dict)
+    workspace_cached_media_index: dict[str, object] = field(default_factory=dict)
+    workspace_cache_builds: int = 0
 
 
 @dataclass
@@ -508,7 +516,7 @@ def _workspace_sort_children(session: ImportSession, parent_key: str, children: 
     )
 
 
-def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> list[dict[str, object]]:
+def _workspace_tree_uncached(session: ImportSession, *, include_virtual: bool = True) -> list[dict[str, object]]:
     """Return the editable virtual import tree.
 
     The scanned filesystem seeds this tree, but workspace role/parent overrides and
@@ -664,22 +672,71 @@ def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> 
         if key not in seen:
             visit(key, 1)
 
-    # Show effective media/page counts, not physical source-file counts. This is
-    # important for rendered PDFs (one source PDF may become many PNG pages) and
-    # for nested Primary Pages / Extras where ancestor scanner groups overlap.
-    counts = {str(node["path"]): 0 for node in result}
-    for media in _workspace_all_media(session):
-        media_path = str(media.path)
+    return result
+
+
+def _workspace_cache_state_signature(session: ImportSession) -> str:
+    """Cheap signature of logical workspace state; no filesystem access."""
+    payload = {
+        "folder_order": session.folder_order_overrides,
+        "metadata_names": {k: v.get("display_name", "") for k, v in session.workspace_metadata.items()},
+        "virtual_groups": session.workspace_virtual_groups,
+        "virtual_nodes": session.workspace_virtual_nodes,
+        "media_targets": session.workspace_media_targets,
+        "role_overrides": session.workspace_role_overrides,
+        "parent_overrides": session.workspace_parent_overrides,
+        "ignored_media": sorted(session.workspace_ignored_media),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _workspace_invalidate_cache(session: ImportSession) -> None:
+    session.workspace_cache_signature = None
+    session.workspace_cached_tree = None
+    session.workspace_cached_folder_media.clear()
+    session.workspace_cached_media_index.clear()
+
+
+def _workspace_ensure_cache(session: ImportSession) -> None:
+    signature = _workspace_cache_state_signature(session)
+    if session.workspace_cached_tree is not None and session.workspace_cache_signature == signature:
+        return
+
+    # This is the one expensive ownership pass. It happens after ingestion or a
+    # real workspace edit, never merely because the user clicked another folder.
+    tree = _workspace_tree_uncached(session)
+    media_items = _workspace_all_media(session)
+    media_index = {str(item.path): item for item in media_items}
+    by_folder: dict[str, list[str]] = {str(node["path"]): [] for node in tree}
+    for item in media_items:
+        media_path = str(item.path)
         if media_path in session.workspace_ignored_media:
             continue
         owner = session.workspace_media_targets.get(media_path)
         if owner is None:
-            owner = _workspace_origin_for_media_in_tree(session, media_path, result)
-        if owner in counts:
-            counts[owner] += 1
-    for node in result:
-        node["direct_files"] = counts.get(str(node["path"]), 0)
-    return result
+            owner = _workspace_origin_for_media_in_tree(session, media_path, tree)
+        if owner in by_folder:
+            by_folder[owner].append(media_path)
+
+    for paths in by_folder.values():
+        paths.sort(key=lambda value: getattr(media_index[value], "order", 0))
+    for node in tree:
+        node["direct_files"] = len(by_folder.get(str(node["path"]), []))
+
+    session.workspace_cached_tree = tree
+    session.workspace_cached_folder_media = by_folder
+    session.workspace_cached_media_index = media_index
+    session.workspace_cache_signature = signature
+    session.workspace_cache_builds += 1
+
+
+def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> list[dict[str, object]]:
+    # include_virtual=False is only used by legacy ownership helpers during a
+    # rebuild. Normal UI/staging reads always consume the virtual cache.
+    if not include_virtual:
+        return _workspace_tree_uncached(session, include_virtual=False)
+    _workspace_ensure_cache(session)
+    return session.workspace_cached_tree or []
 
 
 
@@ -843,19 +900,12 @@ def _workspace_media_for_folder_base(session: ImportSession, folder_key: str) ->
 
 
 def _workspace_media_for_folder(session: ImportSession, folder_key: str) -> list[object]:
-    # Render exactly the same effective ownership that staging uses. Explicit
-    # drag/drop targets win; otherwise choose the deepest semantic source node.
-    tree = _workspace_tree(session)
-    result = []
-    for item in _workspace_all_media(session):
-        media_path = str(item.path)
-        owner = session.workspace_media_targets.get(media_path)
-        if owner is None:
-            owner = _workspace_origin_for_media_in_tree(session, media_path, tree)
-        if owner == folder_key:
-            result.append(item)
-    result.sort(key=lambda item: item.order)
-    return result
+    _workspace_ensure_cache(session)
+    return [
+        session.workspace_cached_media_index[path]
+        for path in session.workspace_cached_folder_media.get(folder_key, [])
+        if path in session.workspace_cached_media_index
+    ]
 
 
 def _workspace_reorder_media(session: ImportSession, ordered_source_paths: list[str]) -> None:
@@ -2316,6 +2366,7 @@ def create_app(
         selected = requested if any(node["path"] == requested for node in tree) else str(tree[0]["path"])
         selected_node = next(node for node in tree if node["path"] == selected)
         media = _workspace_media_for_folder(session, selected)
+        media_targets = _workspace_media_targets_for_folder(session, selected)
         return templates.TemplateResponse(
             request=request,
             name="import_workspace.html",
@@ -2327,8 +2378,8 @@ def create_app(
                 "selected_node": selected_node,
                 "selected_media": media,
                 "selected_metadata": _workspace_node_metadata(session, selected_node),
-                "media_targets": _workspace_media_targets_for_folder(session, selected),
-                "media_target_paths": {path for path, _ in _workspace_media_targets_for_folder(session, selected)},
+                "media_targets": media_targets,
+                "media_target_paths": {path for path, _ in media_targets},
                 "author_value": session.workspace_author if session.workspace_author is not None else (session.author_default or ""),
                 "series_value": session.workspace_series if session.workspace_series is not None else (session.series_default or session.plan.scan.content_root.name),
                 "series_complete_value": session.workspace_series_complete,
@@ -2792,6 +2843,7 @@ def create_app(
         if set(ordered) != {str(item.path) for item in current} or len(ordered) != len(current):
             raise HTTPException(status_code=400, detail="Page order must contain every displayed page exactly once")
         _workspace_reorder_media(session, ordered)
+        _workspace_invalidate_cache(session)
         return Response(status_code=204)
 
     @app.post("/import/{session_id}/review/mark-extra", response_class=HTMLResponse)

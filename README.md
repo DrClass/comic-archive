@@ -651,3 +651,14 @@ Scanner hardening added two default guesses: a folder containing multiple PDFs a
 - Fixed a drag/reparent race where `dragend` cleared the active DOM node before the asynchronous move completed, causing `Cannot read properties of null` after moving newly-created folders.
 - Added regressions for nested extras visual ownership, PDF rendered-page counts, and the drag/reparent race.
 - Full test suite: 161 passed.
+
+## Milestone 38 — virtual workspace cache
+
+- Folder navigation no longer rebuilds effective media ownership for the whole comic on every click.
+- The importer builds one in-memory virtual workspace index containing the logical tree, a folder-to-media-ID map, and a media-ID-to-record map.
+- Normal workspace reads (tree rendering, right-hand page view, effective counts, and destination choices) reuse that cache directly and do not traverse source directories.
+- A cheap signature over logical workspace state invalidates the cache only when structure actually changes: role/parent changes, file moves, ignore state, virtual folders, names, or ordering.
+- Media reordering explicitly invalidates the cache because its order lives on the scanned media records rather than in the logical workspace dictionaries.
+- Removed the duplicate media-target calculation from the review route.
+- Added regression tests proving repeated folder reads do not invoke the filesystem-backed workspace builder, while a logical edit triggers exactly one rebuild.
+- Full test suite: 163 passed.

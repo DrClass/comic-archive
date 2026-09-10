@@ -3008,3 +3008,49 @@ def test_workspace_drag_script_captures_path_before_async_move(tmp_path: Path):
     assert "const draggedPath = draggedNode.dataset.path;" in workspace.text
     assert "encodeURIComponent(draggedPath)" in workspace.text
     assert "encodeURIComponent(draggedNode.dataset.path)" not in workspace.text
+
+
+def test_workspace_virtual_cache_reused_between_folder_reads(tmp_path: Path, monkeypatch):
+    from comic_archive.web import ImportSession, _workspace_media_for_folder, _workspace_tree
+    import comic_archive.web as web_module
+
+    source = tmp_path / "Comic"
+    for path in ("Chapter 1/001.jpg", "Chapter 1/002.jpg", "Chapter 2/001.jpg"):
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.encode())
+    session = ImportSession(plan=build_review_plan(scan_folder(source)))
+
+    tree = _workspace_tree(session)
+    first_builds = session.workspace_cache_builds
+    assert first_builds == 1
+    chapter = next(str(node["path"]) for node in tree if node["name"] == "Chapter 1")
+
+    original = web_module._workspace_tree_uncached
+    def fail_if_rebuilt(*args, **kwargs):
+        raise AssertionError("folder navigation rebuilt the filesystem-backed workspace")
+    monkeypatch.setattr(web_module, "_workspace_tree_uncached", fail_if_rebuilt)
+
+    assert _workspace_tree(session) is tree
+    assert len(_workspace_media_for_folder(session, chapter)) == 2
+    assert _workspace_tree(session) is tree
+    assert session.workspace_cache_builds == first_builds
+    monkeypatch.setattr(web_module, "_workspace_tree_uncached", original)
+
+
+def test_workspace_virtual_cache_invalidates_after_logical_edit(tmp_path: Path):
+    from comic_archive.web import ImportSession, _workspace_tree
+
+    source = tmp_path / "Comic"
+    target = source / "Chapter 1" / "001.jpg"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"one")
+    session = ImportSession(plan=build_review_plan(scan_folder(source)))
+
+    tree = _workspace_tree(session)
+    chapter = next(str(node["path"]) for node in tree if node["name"] == "Chapter 1")
+    assert session.workspace_cache_builds == 1
+    session.workspace_role_overrides[chapter] = "Issue-Extras"
+    rebuilt = _workspace_tree(session)
+    assert session.workspace_cache_builds == 2
+    assert next(node for node in rebuilt if str(node["path"]) == chapter)["role"] == "Issue-Extras"
