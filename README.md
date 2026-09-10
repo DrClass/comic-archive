@@ -662,3 +662,9 @@ Scanner hardening added two default guesses: a folder containing multiple PDFs a
 - Removed the duplicate media-target calculation from the review route.
 - Added regression tests proving repeated folder reads do not invoke the filesystem-backed workspace builder, while a logical edit triggers exactly one rebuild.
 - Full test suite: 163 passed.
+
+## Milestone 39 hotfix
+- Fixed seeded PDF issue pages becoming unassigned after metadata/folder-label edits triggered a virtual-cache rebuild.
+- Scanner-seeded logical PDF issue nodes now retain ownership of their rendered pages.
+- Added regression coverage for renaming/renumbering PDF issues.
+- Test suite: 164 passed.

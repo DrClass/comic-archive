@@ -3054,3 +3054,34 @@ def test_workspace_virtual_cache_invalidates_after_logical_edit(tmp_path: Path):
     rebuilt = _workspace_tree(session)
     assert session.workspace_cache_builds == 2
     assert next(node for node in rebuilt if str(node["path"]) == chapter)["role"] == "Issue-Extras"
+
+
+def test_seeded_pdf_issue_keeps_pages_after_metadata_rename_and_cache_rebuild(tmp_path: Path):
+    import fitz
+    from comic_archive.web import ImportSession, _workspace_media_for_folder, _workspace_tree
+
+    source = tmp_path / "Amazing Comic"
+    source.mkdir()
+    for pdf_name in ("Amazing Comic 1.pdf", "Amazing Comic 2.pdf"):
+        document = fitz.open()
+        for index in range(2):
+            page = document.new_page()
+            page.insert_text((72, 72), f"{pdf_name} page {index + 1}")
+        document.save(source / pdf_name)
+        document.close()
+
+    session = ImportSession(plan=build_review_plan(scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")))
+    tree = _workspace_tree(session)
+    issue = next(node for node in tree if node.get("seeded") and node["role"] == "Issue")
+    issue_key = str(issue["path"])
+    assert len(_workspace_media_for_folder(session, issue_key)) == 2
+
+    # The UI saves a folder label as display_name. That must be a metadata-only
+    # change: rebuilding the virtual cache cannot detach rendered PDF pages.
+    session.workspace_metadata.setdefault(issue_key, {})["display_name"] = "Issue 7"
+    session.workspace_metadata[issue_key]["issue_number"] = "7"
+
+    rebuilt = _workspace_tree(session)
+    rebuilt_issue = next(node for node in rebuilt if str(node["path"]) == issue_key)
+    assert rebuilt_issue["name"] == "Issue 7"
+    assert len(_workspace_media_for_folder(session, issue_key)) == 2

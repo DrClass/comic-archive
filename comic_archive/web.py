@@ -812,7 +812,11 @@ def _workspace_origin_for_media_in_tree(session: ImportSession, media_path: str,
         "Issue": 3, "Sub-Series": 2, "Series": 1,
     }
     for node in tree:
-        if node.get("virtual"):
+        # Scanner-seeded logical nodes (notably one issue per loose PDF) are
+        # virtual only because they have no physical directory. They still own
+        # their scanned media. Skip only genuinely synthetic/user-created
+        # virtual folders, which have no source media until files are moved in.
+        if node.get("virtual") and not node.get("seeded"):
             continue
         if node["is_root"] and node["role"] not in {"Issue", "Primary Pages"}:
             continue
