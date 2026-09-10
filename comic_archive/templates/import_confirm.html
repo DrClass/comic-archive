@@ -8,19 +8,21 @@
 {% for issue in staged.issues %}<li>Issue {{ issue.issue_number or issue.title or '(unlabeled)' }} — {{ issue.groups|length }} content groups</li>{% endfor %}
 {% for extra in staged.series_extras %}<li>Series extra: {{ extra.name }} — {{ extra.media|length }} media</li>{% endfor %}
 </ul>
-<form method="post" action="/import/{{ session_id }}/commit" class="import-processing-form" data-processing-message="Importing comic…">
+<form method="post" action="/import/{{ session_id }}/commit" class="import-processing-form" data-processing-message="Importing comic…" data-progress-url="/import/{{ session_id }}/commit-progress">
 <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
 {% if duplicate %}<p><label><input type="checkbox" name="allow_duplicate" value="yes" required> Import anyway despite duplicate warning</label></p>{% endif %}
 <button type="submit">Commit import</button>
 <div class="import-processing" hidden>
   <progress aria-label="Import in progress"></progress>
-  <span>Importing comic… Please leave this page open.</span>
+  <span class="import-progress-phase">Starting import…</span>
+  <span class="import-progress-detail muted"></span>
 </div>
 </form>
 {% if is_bulk %}
-<form method="post" action="/import/{{ session_id }}/skip" class="skip-import-form">
+<form method="post" action="/import/{{ session_id }}/skip" class="skip-import-form import-processing-form" data-processing-message="Skipping comic…">
 <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
 <button type="submit">Skip this comic and continue</button>
+<div class="import-processing" hidden><progress aria-label="Skip in progress"></progress><span>Skipping comic and preparing the next item…</span></div>
 </form>
 {% endif %}
 <p class="muted">Commit copies files into the managed library. Source files remain untouched.</p>

@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from .staging import SCHEMA_VERSION, StagedGroup, StagedImport, StagedIssue, StagedMedia, StagedSeries
@@ -502,6 +503,9 @@ def _copy_group(
     sort_order: int,
     created_paths: list[Path],
     file_hashes: dict[str, str] | None = None,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+    progress_counter: list[int] | None = None,
+    progress_total: int = 0,
 ) -> tuple[int, int]:
     group_id = str(uuid4())
     db.execute(
@@ -521,6 +525,9 @@ def _copy_group(
         media_id = str(uuid4())
         filename = f"{position:06d}{_extension_for(item)}"
         destination = group_root / filename
+        if progress_callback is not None:
+            current = progress_counter[0] + 1 if progress_counter else position
+            progress_callback("copying", current, progress_total, Path(item.source_path).name)
         shutil.copy2(item.source_path, destination)
         stored_rel = destination.relative_to(library_root).as_posix()
         file_hash = (file_hashes or {}).get(item.source_path) or _sha256_file(item.source_path)
@@ -547,8 +554,13 @@ def _copy_group(
         if item.mime_type.startswith("image/"):
             from ..thumbnails import create_thumbnail
             thumb_path = destination.parent / "_thumbs" / f"{media_id}.jpg"
+            if progress_callback is not None:
+                current = progress_counter[0] + 1 if progress_counter else position
+                progress_callback("thumbnailing", current, progress_total, Path(item.source_path).name)
             create_thumbnail(destination, thumb_path, mime_type=item.mime_type)
         copied_files += 1
+        if progress_counter is not None:
+            progress_counter[0] += 1
         copied_bytes += item.size_bytes
     return copied_files, copied_bytes
 
@@ -559,7 +571,11 @@ def commit_staged_import(
     library_root: str | Path,
     database_path: str | Path,
     allow_duplicate: bool = False,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
 ) -> CommitResult:
+    total_files = sum(len(group.media) for issue in staged.issues for group in issue.groups) + sum(len(group.media) for group in staged.series_extras)
+    if progress_callback is not None:
+        progress_callback("validating", 0, total_files, "Checking staged source files")
     errors = validate_staged_sources(staged)
     if errors:
         raise CommitError("Staged import failed validation:\n- " + "\n- ".join(errors))
@@ -578,6 +594,8 @@ def commit_staged_import(
         with sqlite3.connect(database) as db:
             db.execute("PRAGMA foreign_keys = ON")
             db.execute("BEGIN IMMEDIATE")
+            if progress_callback is not None:
+                progress_callback("database", 0, total_files, "Preparing library database")
             _backfill_hashes_and_fingerprints(db, library)
             existing = db.execute(
                 "SELECT id FROM imports WHERE staging_id = ?", (staged.staging_id,)
@@ -585,6 +603,8 @@ def commit_staged_import(
             if existing:
                 raise CommitError(f"Staging record has already been committed: {staged.staging_id}")
 
+            if progress_callback is not None:
+                progress_callback("hashing", 0, total_files, "Hashing source files and checking duplicates")
             duplicate_warnings, computed_hashes = find_duplicate_warnings(db, staged)
             if duplicate_warnings and not allow_duplicate:
                 raise CommitError(
@@ -618,6 +638,7 @@ def commit_staged_import(
                 for key, sid in series_ids_by_key.items()
             }
             imported_counts: dict[str, int] = {key: 0 for key in series_ids_by_key}
+            progress_counter = [0]
             ordered_staged_issues = sorted(
                 enumerate(staged.issues),
                 key=lambda pair: (
@@ -659,6 +680,7 @@ def commit_staged_import(
                         sort_order=index,
                         created_paths=created_paths,
                         file_hashes=issue_hashes,
+                        progress_callback=progress_callback, progress_counter=progress_counter, progress_total=total_files,
                     )
                     copied_files += count
                     copied_bytes += size
@@ -678,16 +700,21 @@ def commit_staged_import(
                     library_root=library,
                     sort_order=extra_orders[owner_key],
                     created_paths=created_paths,
+                    progress_callback=progress_callback, progress_counter=progress_counter, progress_total=total_files,
                 )
                 copied_files += count
                 copied_bytes += size
 
+            if progress_callback is not None:
+                progress_callback("finalizing", total_files, total_files, "Finalizing database records")
             db.execute(
                 """INSERT INTO imports(id, staging_id, source_path, author_id, series_id)
                    VALUES (?, ?, ?, ?, ?)""",
                 (import_id, staged.staging_id, staged.source_path, author_id, series_id),
             )
             db.commit()
+            if progress_callback is not None:
+                progress_callback("complete", total_files, total_files, "Import complete")
     except Exception:
         # Database rollback is handled by sqlite context cleanup. Remove only
         # storage directories created by this commit; never touch source files.

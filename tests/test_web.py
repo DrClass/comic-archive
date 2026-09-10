@@ -2879,3 +2879,71 @@ def test_workspace_root_can_be_container_with_child_series(tmp_path: Path):
     staged = client.app.state.import_sessions[session_id].staged
     assert staged.series == "Actual Comic"
     assert len(staged.issues) == 1
+
+
+def test_virtual_tree_staging_preserves_nested_issue_extras_in_one_shot(tmp_path: Path):
+    source = tmp_path / "one-shot issue"
+    source.mkdir()
+    (source / "page1.png").write_bytes(b"page1")
+    (source / "page2.png").write_bytes(b"page2")
+    (source / "textless").mkdir()
+    (source / "textless" / "page1.png").write_bytes(b"textless")
+
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": ".", "role": "issue"}, follow_redirects=False)
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": "textless", "role": "issue-extras"}, follow_redirects=False)
+    finalized = _post(client, f"/import/{session_id}/workspace/finalize", data={"author": "Artist", "series": "One Shot"}, follow_redirects=False)
+    assert finalized.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    assert staged is not None
+    assert len(staged.issues) == 1
+    groups = staged.issues[0].groups
+    primary = next(group for group in groups if group.role == "primary")
+    extra = next(group for group in groups if group.role == "issue-extra")
+    assert [Path(media.source_path).name for media in primary.media] == ["page1.png", "page2.png"]
+    assert [Path(media.source_path).name for media in extra.media] == ["page1.png"]
+
+
+def test_virtual_tree_staging_respects_primary_pages_and_issue_extras_siblings(tmp_path: Path):
+    source = tmp_path / "issue 1"
+    for folder in ("with text", "without text"):
+        target = source / folder
+        target.mkdir(parents=True)
+        (target / "page1.png").write_bytes((folder + "1").encode())
+        (target / "page2.png").write_bytes((folder + "2").encode())
+
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": ".", "role": "issue"}, follow_redirects=False)
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": "with text", "role": "primary-pages"}, follow_redirects=False)
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": "without text", "role": "issue-extras"}, follow_redirects=False)
+    finalized = _post(client, f"/import/{session_id}/workspace/finalize", data={"author": "Artist", "series": "Comic"}, follow_redirects=False)
+    assert finalized.status_code == 303
+    staged = client.app.state.import_sessions[session_id].staged
+    groups = staged.issues[0].groups
+    primary = next(group for group in groups if group.role == "primary")
+    extra = next(group for group in groups if group.role == "issue-extra")
+    assert {Path(media.source_path).parent.name for media in primary.media} == {"with text"}
+    assert {Path(media.source_path).parent.name for media in extra.media} == {"without text"}
+
+
+def test_confirm_skip_locks_like_commit_and_commit_has_live_progress(tmp_path: Path):
+    source = tmp_path / "comic"
+    source.mkdir()
+    (source / "001.jpg").write_bytes(b"one")
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    finalized = _post(client, f"/import/{session_id}/workspace/finalize", data={"author": "Artist", "series": "Comic"}, follow_redirects=False)
+    confirm = client.get(finalized.headers["location"])
+    assert 'data-progress-url="/import/' in confirm.text
+    assert 'class="skip-import-form import-processing-form"' not in confirm.text  # not bulk
+    assert "import-progress-phase" in confirm.text

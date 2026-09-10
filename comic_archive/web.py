@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import json
 import secrets
@@ -729,13 +730,28 @@ def _workspace_all_media(session: ImportSession) -> list[object]:
 
 
 def _workspace_origin_for_media(session: ImportSession, media_path: str) -> str | None:
+    # A scanned issue can contain media that also belongs to a more specific
+    # nested group (for example ``Issue/Textless``).  The old implementation
+    # returned the first matching ancestor, which made staging flatten that
+    # nested group back into the issue even when the workspace showed it as
+    # Issue-Extras/Primary Pages.  Prefer the deepest matching semantic node so
+    # the virtual tree remains authoritative.
+    matches: list[tuple[int, int, str]] = []
+    role_rank = {
+        "Issue-Extras": 5, "Series-Extras": 5, "Primary Pages": 4,
+        "Issue": 3, "Sub-Series": 2, "Series": 1,
+    }
     for node in _workspace_tree(session, include_virtual=False):
         if node["is_root"] and node["role"] not in {"Issue", "Primary Pages"}:
             continue
         for media in _workspace_media_for_folder_base(session, str(node["path"])):
             if str(media.path) == media_path:
-                return str(node["path"])
-    return None
+                matches.append((int(node.get("depth", 0)), role_rank.get(str(node.get("role")), 0), str(node["path"])))
+                break
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][2]
 
 
 def _workspace_media_targets_for_folder(session: ImportSession, folder_key: str) -> list[tuple[str, str]]:
@@ -1734,6 +1750,7 @@ def create_app(
     app.state.import_sessions: dict[str, ImportSession] = {}
     app.state.bulk_import_sessions: dict[str, BulkArtistSession] = {}
     app.state.login_attempts: dict[str, list[float]] = {}
+    app.state.import_progress: dict[str, dict[str, object]] = {}
     app.state.last_upload_sweep = 0.0
 
     @app.middleware("http")
@@ -3094,6 +3111,15 @@ def create_app(
             },
         )
 
+    @app.get("/import/{session_id}/commit-progress")
+    def import_commit_progress(session_id: str):
+        progress = app.state.import_progress.get(session_id)
+        if progress is None:
+            if _load_completed_import(app, session_id) is not None:
+                return {"phase": "complete", "current": 1, "total": 1, "detail": "Import complete"}
+            return {"phase": "waiting", "current": 0, "total": 0, "detail": "Waiting to start"}
+        return progress
+
     @app.post("/import/{session_id}/commit", response_class=HTMLResponse)
     async def import_commit(request: Request, session_id: str):
         # A completed receipt makes this endpoint idempotent. Double-clicks, refreshes,
@@ -3107,12 +3133,24 @@ def create_app(
         form = await _form_data(request)
         _touch_import_activity(app, session)
         allow_duplicate = form.get("allow_duplicate") == "yes"
+        def report_progress(phase: str, current: int, total: int, detail: str) -> None:
+            app.state.import_progress[session_id] = {
+                "phase": phase, "current": current, "total": total, "detail": detail,
+                "updated_at": time.time(),
+            }
+
+        app.state.import_progress[session_id] = {
+            "phase": "starting", "current": 0, "total": 0,
+            "detail": "Starting import", "updated_at": time.time(),
+        }
         try:
-            result = commit_staged_import(
+            result = await asyncio.to_thread(
+                commit_staged_import,
                 session.staged,
                 library_root=library,
                 database_path=database,
                 allow_duplicate=allow_duplicate,
+                progress_callback=report_progress,
             )
             result_payload = {
                 "import_id": result.import_id, "author_id": result.author_id,

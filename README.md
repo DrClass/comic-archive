@@ -629,3 +629,17 @@ Supported workspace roles now include Series, Sub-Series, Issue, Issue-Extras, S
 Files can be ignored individually during import and restored before commit. Setting a whole folder/node to Ignore excludes its descendant import content. Validation blocks files left in non-semantic Container/Unassigned locations and points out that they need a destination or Ignore state.
 
 Scanner hardening added two default guesses: a folder containing multiple PDFs and no other supported media seeds one issue candidate per PDF, and a series containing multiple issue-like child folders plus only loose cover/promo-style media keeps the child folders as issues and places the loose media into Series extras instead of flattening the import.
+
+## Milestone 36 — virtual-tree staging + live import progress
+
+- Fixes virtual-tree staging flattening nested semantic folders back into their ancestor issue.
+  - `one-shot issue/textless` remains Issue Extras when assigned that role.
+  - sibling `with text` Primary Pages and `without text` Issue Extras remain separate.
+  - staging now prefers the deepest matching semantic virtual-tree node for each source media file.
+- Bulk `Skip this comic and continue` now uses the same submit-lock/processing UI as Commit.
+- Commit now runs off the ASGI event loop and publishes live progress state.
+- Confirmation polls `/import/<session>/commit-progress` while the POST is processing.
+- Progress reports meaningful phases: validation, database preparation, hashing/duplicate checking, copying, thumbnail generation, finalization, complete.
+- Copy/thumbnail phases include current filename and file-count progress.
+- This makes unusually long imports diagnosable: the UI shows whether time is being spent hashing, copying, or generating thumbnails.
+- Full suite: 158 tests passed.

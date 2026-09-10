@@ -289,12 +289,44 @@
       });
       const progress = form.querySelector('.import-processing');
       if (progress) progress.hidden = false;
+      const progressUrl = form.dataset.progressUrl;
+      if (progressUrl) {
+        const bar = form.querySelector('.import-processing progress');
+        const phaseLabel = form.querySelector('.import-progress-phase');
+        const detailLabel = form.querySelector('.import-progress-detail');
+        const labels = {
+          starting: 'Starting import…', validating: 'Validating source files…',
+          database: 'Preparing database…', hashing: 'Hashing files / checking duplicates…',
+          copying: 'Copying media…', thumbnailing: 'Generating thumbnails…',
+          finalizing: 'Finalizing database…', complete: 'Done…', waiting: 'Waiting to start…'
+        };
+        const poll = async () => {
+          try {
+            const response = await fetch(progressUrl, {cache: 'no-store'});
+            if (!response.ok) return;
+            const data = await response.json();
+            if (phaseLabel) phaseLabel.textContent = labels[data.phase] || data.phase || 'Working…';
+            if (detailLabel) detailLabel.textContent = data.detail || '';
+            if (bar) {
+              if (data.total > 0 && ['copying', 'thumbnailing', 'finalizing', 'complete'].includes(data.phase)) {
+                bar.max = data.total;
+                bar.value = Math.min(data.current || 0, data.total);
+              } else {
+                bar.removeAttribute('value');
+              }
+            }
+          } catch (_) {}
+        };
+        poll();
+        form._progressTimer = window.setInterval(poll, 750);
+      }
     });
   });
 
   // Browsers may restore a page from the back/forward cache with disabled controls.
   window.addEventListener('pageshow', () => {
     document.querySelectorAll('form.import-processing-form').forEach((form) => {
+      if (form._progressTimer) { window.clearInterval(form._progressTimer); form._progressTimer = null; }
       form.dataset.submitting = '';
       form.classList.remove('is-processing');
       form.querySelectorAll('button[type="submit"], input[type="submit"]').forEach((button) => {
