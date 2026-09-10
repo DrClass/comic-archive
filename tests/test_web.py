@@ -2154,7 +2154,7 @@ def test_import_pages_use_resumable_file_by_file_upload_ui(tmp_path: Path):
     for response in (single, bulk):
         assert response.status_code == 200
         assert "/import/upload-session" in response.text
-        assert "concurrency = 3" in response.text
+        assert "concurrency = 6" in response.text
         assert "maxAttempts = 3" in response.text
         assert "Resume upload" in response.text
         assert "X-File-Size" in response.text

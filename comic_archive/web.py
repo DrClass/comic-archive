@@ -48,6 +48,9 @@ templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 UPLOAD_INACTIVITY_SECONDS = 12 * 60 * 60
 UPLOAD_SWEEP_INTERVAL_SECONDS = 60 * 60
 MAX_BROWSER_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024
+UPLOAD_STATE_CHECKPOINT_FILES = 25
+UPLOAD_STATE_CHECKPOINT_SECONDS = 2.0
+UPLOAD_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
 logger = logging.getLogger("comic_archive.web")
 
 
@@ -122,6 +125,10 @@ class BrowserUploadSession:
     last_activity: float = field(default_factory=time.time)
     cancelled: bool = False
     scan_progress: dict[str, object] = field(default_factory=dict)
+    last_persisted_count: int = 0
+    last_persisted_at: float = field(default_factory=time.monotonic)
+    uploaded_bytes: int = 0
+    started_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -368,6 +375,45 @@ def _persist_browser_upload_session(app: FastAPI, upload_id: str, session: Brows
     })
 
 
+
+
+def _reconcile_browser_upload_files(session: BrowserUploadSession) -> None:
+    """Recover completed files from disk after a process restart.
+
+    Browser upload state is checkpointed periodically for throughput. Completed
+    files written since the last checkpoint are authoritative on disk and are
+    added back to received_paths here. .part files are deliberately ignored.
+    """
+    content_root = session.upload_root / "content"
+    if not content_root.is_dir():
+        return
+    recovered: set[str] = set()
+    for root, _dirs, files in __import__("os").walk(content_root):
+        root_path = Path(root)
+        for name in files:
+            if name.endswith(".part"):
+                continue
+            path = root_path / name
+            try:
+                relative = path.relative_to(content_root).as_posix()
+            except ValueError:
+                continue
+            recovered.add(relative)
+    if recovered:
+        session.received_paths.update(recovered)
+
+
+def _checkpoint_browser_upload_session(app: FastAPI, upload_id: str, session: BrowserUploadSession, *, force: bool = False) -> None:
+    now = time.monotonic()
+    count = len(session.received_paths)
+    if not force:
+        if count - session.last_persisted_count < UPLOAD_STATE_CHECKPOINT_FILES and now - session.last_persisted_at < UPLOAD_STATE_CHECKPOINT_SECONDS:
+            return
+    _persist_browser_upload_session(app, upload_id, session)
+    session.last_persisted_count = count
+    session.last_persisted_at = now
+
+
 def _restore_browser_upload_session(app: FastAPI, upload_id: str) -> BrowserUploadSession | None:
     path = _session_state_path(app, "browser_upload", upload_id)
     if not path.exists():
@@ -397,6 +443,9 @@ def _restore_browser_upload_session(app: FastAPI, upload_id: str) -> BrowserUplo
         )
         if session.cancelled:
             return None
+        _reconcile_browser_upload_files(session)
+        session.last_persisted_count = len(session.received_paths)
+        session.last_persisted_at = time.monotonic()
         app.state.upload_sessions[upload_id] = session
         return session
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
@@ -468,6 +517,7 @@ async def _save_upload_file(request: Request, session: BrowserUploadSession) -> 
     started = time.monotonic()
     try:
         with temporary.open("wb") as target:
+            pending = bytearray()
             async for chunk in request.stream():
                 if not chunk:
                     continue
@@ -476,7 +526,13 @@ async def _save_upload_file(request: Request, session: BrowserUploadSession) -> 
                     raise HTTPException(status_code=413, detail="File exceeds the 16 GiB browser-upload limit")
                 if expected_size is not None and received_bytes > expected_size:
                     raise HTTPException(status_code=400, detail="Received more bytes than declared by X-File-Size")
-                target.write(chunk)
+                pending.extend(chunk)
+                if len(pending) >= UPLOAD_WRITE_BUFFER_BYTES:
+                    payload = bytes(pending)
+                    pending.clear()
+                    await asyncio.to_thread(target.write, payload)
+            if pending:
+                await asyncio.to_thread(target.write, bytes(pending))
         if expected_size is not None and received_bytes != expected_size:
             raise HTTPException(status_code=400, detail=f"Incomplete upload body: received {received_bytes} of {expected_size} bytes")
         if session.cancelled:
@@ -485,6 +541,7 @@ async def _save_upload_file(request: Request, session: BrowserUploadSession) -> 
             raise HTTPException(status_code=409, detail="Upload session was cancelled")
         temporary.replace(destination)
         session.received_paths.add(normalized)
+        session.uploaded_bytes += received_bytes
         _touch_browser_upload(session)
         count = len(session.received_paths)
         elapsed = time.monotonic() - started
@@ -2274,11 +2331,14 @@ def create_app(
     async def upload_session_file(request: Request, upload_id: str):
         upload = _upload_session_or_404(app, upload_id)
         relative = await _save_upload_file(request, upload)
-        _persist_browser_upload_session(app, upload_id, upload)
+        _checkpoint_browser_upload_session(app, upload_id, upload)
+        elapsed = max(0.001, time.monotonic() - upload.started_at)
+        throughput_mib_s = upload.uploaded_bytes / (1024 * 1024) / elapsed
         return JSONResponse({
             "relative_path": relative,
             "received_files": len(upload.received_paths),
             "expected_files": upload.expected_files,
+            "throughput_mib_s": round(throughput_mib_s, 2),
         })
 
     @app.get("/import/upload-session/{upload_id}/status", response_class=JSONResponse)
@@ -2305,7 +2365,7 @@ def create_app(
         await _form_data(request)
         upload = _upload_session_or_404(app, upload_id)
         _touch_browser_upload(upload)
-        _persist_browser_upload_session(app, upload_id, upload)
+        _checkpoint_browser_upload_session(app, upload_id, upload, force=True)
         if len(upload.received_paths) != upload.expected_files:
             return JSONResponse(
                 {
