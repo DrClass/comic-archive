@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from .importer.commit import initialize_database
+from .database import connect_database
 
 
 @dataclass(slots=True)
@@ -16,8 +16,7 @@ class ReadingProgress:
 
 
 def get_progress(database_path: str | Path, user_id: str, issue_id: str) -> ReadingProgress | None:
-    database = initialize_database(database_path)
-    with sqlite3.connect(database) as db:
+    with connect_database(database_path) as db:
         row = db.execute(
             "SELECT issue_id, page, completed, updated_at FROM reading_progress WHERE user_id = ? AND issue_id = ?",
             (user_id, issue_id),
@@ -30,9 +29,8 @@ def get_progress(database_path: str | Path, user_id: str, issue_id: str) -> Read
 def get_progress_map(database_path: str | Path, user_id: str, issue_ids: list[str]) -> dict[str, ReadingProgress]:
     if not issue_ids:
         return {}
-    database = initialize_database(database_path)
     placeholders = ",".join("?" for _ in issue_ids)
-    with sqlite3.connect(database) as db:
+    with connect_database(database_path) as db:
         rows = db.execute(
             f"""SELECT issue_id, page, completed, updated_at
                 FROM reading_progress
@@ -56,8 +54,7 @@ def save_progress(
         raise ValueError("total_pages must be positive")
     page = max(1, min(int(page), total_pages))
     completed = page >= total_pages
-    database = initialize_database(database_path)
-    with sqlite3.connect(database) as db:
+    with connect_database(database_path) as db:
         exists = db.execute("SELECT 1 FROM issues WHERE id = ?", (issue_id,)).fetchone()
         if not exists:
             raise ValueError("Issue not found")
@@ -78,14 +75,12 @@ def save_progress(
 
 
 def reset_progress(database_path: str | Path, user_id: str, issue_id: str) -> None:
-    database = initialize_database(database_path)
-    with sqlite3.connect(database) as db:
+    with connect_database(database_path) as db:
         db.execute("DELETE FROM reading_progress WHERE user_id = ? AND issue_id = ?", (user_id, issue_id))
 
 
 def get_continue_reading(database_path: str | Path, user_id: str, *, limit: int = 8) -> list[dict[str, object]]:
-    database = initialize_database(database_path)
-    with sqlite3.connect(database) as db:
+    with connect_database(database_path) as db:
         db.row_factory = sqlite3.Row
         rows = db.execute(
             """SELECT rp.issue_id, rp.page, rp.updated_at,

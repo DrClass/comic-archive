@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .importer.commit import initialize_database
+from .database import connect_database
 
 
 class EditError(RuntimeError):
@@ -19,8 +19,7 @@ _UNSET = object()
 
 
 def _connect(database_path: str | Path) -> sqlite3.Connection:
-    database = initialize_database(database_path)
-    db = sqlite3.connect(database)
+    db = connect_database(database_path)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     return db

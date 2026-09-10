@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
-from urllib.parse import parse_qs
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
@@ -36,10 +35,10 @@ from .editing import EditError, create_issue_extra_group, delete_series, edit_is
 from .thumbnails import THUMBNAIL_MIME, ensure_thumbnail
 from .progress import get_continue_reading, get_progress, get_progress_map, reset_progress, save_progress
 from .maintenance import build_maintenance_report, series_gaps, set_intentional_gap
-from .auth import (
-    AuthError, authenticate, change_password, create_user, get_or_create_session_secret,
-    get_user, list_users, reset_password, set_user_active, set_user_admin,
-)
+from .auth import get_or_create_session_secret, get_user, initialize_auth_database
+from .database import connect_database
+from .routes.auth import register_auth_routes
+from .web_forms import form_data as _form_data, check_csrf_value as _check_csrf_value
 
 
 _TEMPLATE_DIR = Path(__file__).with_name("templates")
@@ -333,8 +332,7 @@ def _series_lineage(author: AuthorView, series: SeriesView) -> list[SeriesView]:
 
 
 def _media_record(database: Path, media_id: str) -> tuple[str, str] | None:
-    database = initialize_database(database)
-    with sqlite3.connect(database) as db:
+    with connect_database(database) as db:
         row = db.execute(
             "SELECT stored_path, mime_type FROM media WHERE id = ? AND active = 1",
             (media_id,),
@@ -351,24 +349,6 @@ def _safe_library_file(library_root: Path, stored_path: str) -> Path:
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail="Media file not found")
     return candidate
-
-
-async def _form_data(request: Request, *, check_csrf: bool = True) -> dict[str, str]:
-    raw = (await request.body()).decode("utf-8", errors="replace")
-    parsed = parse_qs(raw, keep_blank_values=True)
-    form = {key: values[-1] if values else "" for key, values in parsed.items()}
-    if check_csrf:
-        expected = request.session.get("csrf_token", "")
-        supplied = form.get("csrf_token", "")
-        if not expected or not supplied or not secrets.compare_digest(expected, supplied):
-            raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
-    return form
-
-
-def _check_csrf_value(request: Request, supplied: str) -> None:
-    expected = request.session.get("csrf_token", "")
-    if not expected or not supplied or not secrets.compare_digest(expected, supplied):
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
 
 
 def _safe_upload_relative(filename: str) -> Path:
@@ -1898,9 +1878,7 @@ def _start_bulk_item(app: FastAPI, bulk_id: str) -> str | None:
 
 
 def _all_media_for_group(database: Path, group_id: str) -> list[dict[str, object]]:
-    database = initialize_database(database)
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
+    with connect_database(database, row_factory=True) as db:
         rows = db.execute(
             """SELECT id, position, original_relative_path, mime_type, media_kind, size_bytes, active
                FROM media WHERE group_id = ? ORDER BY active DESC, position, id""",
@@ -1910,16 +1888,12 @@ def _all_media_for_group(database: Path, group_id: str) -> list[dict[str, object
 
 
 def _author_choices(database: Path) -> list[dict[str, str]]:
-    database = initialize_database(database)
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
+    with connect_database(database, row_factory=True) as db:
         return [dict(row) for row in db.execute("SELECT id, name FROM authors ORDER BY name COLLATE NOCASE")]
 
 
 def _series_choices(database: Path) -> list[dict[str, str]]:
-    database = initialize_database(database)
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
+    with connect_database(database, row_factory=True) as db:
         return [dict(row) for row in db.execute(
             """SELECT s.id, s.title, a.name AS author_name
                FROM series s JOIN authors a ON a.id = s.author_id
@@ -1928,9 +1902,7 @@ def _series_choices(database: Path) -> list[dict[str, str]]:
 
 
 def _issues_for_series(database: Path, series_id: str) -> list[dict[str, object]]:
-    database = initialize_database(database)
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
+    with connect_database(database, row_factory=True) as db:
         rows = db.execute(
             """SELECT id, issue_number, title, sort_order FROM issues WHERE series_id = ?
                ORDER BY COALESCE(sort_order, 2147483647), COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
@@ -1985,12 +1957,10 @@ def _search_library(database: Path, query: str, *, limit: int = 100) -> list[dic
     if not query:
         return []
 
-    database = initialize_database(database)
     pattern = f"%{query}%"
     results: list[dict[str, object]] = []
 
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
+    with connect_database(database, row_factory=True) as db:
 
         for row in db.execute(
             """SELECT id, name
@@ -2100,7 +2070,8 @@ def create_app(
     secure_cookies: bool = False,
     import_root: str | Path | None = None,
 ) -> FastAPI:
-    database = Path(database_path).expanduser().resolve()
+    database = initialize_database(database_path)
+    initialize_auth_database(database)
     library = Path(library_root).expanduser().resolve()
     staging = Path(staging_root).expanduser().resolve()
     imports = database.parent if import_root is None else Path(import_root).expanduser().resolve()
@@ -2183,165 +2154,13 @@ def create_app(
                 _persist_bulk_session(app, active_id, active_bulk)
         return response
 
-        user_id = request.session.get("user_id")
-        user = get_user(database, user_id) if user_id else None
-        if user is None:
-            request.session.clear()
-            return RedirectResponse("/login", status_code=303)
-
-        request.state.user = user
-        admin_only = (
-            path.startswith("/import")
-            or path.startswith("/admin")
-            or path == "/history"
-            or "/edit" in path
-            or (path.startswith("/media/") and request.method == "POST")
-        )
-        if admin_only and not user.is_admin:
-            return HTMLResponse("Administrator access required", status_code=403)
-        return await call_next(request)
-
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
         # Avoid redirecting the browser's automatic favicon request through
         # the authentication flow. A real favicon can replace this later.
         return Response(status_code=204)
 
-    @app.get("/login", response_class=HTMLResponse)
-    def login_page(request: Request):
-        if request.session.get("user_id") and get_user(database, request.session["user_id"]):
-            return RedirectResponse("/", status_code=303)
-        return templates.TemplateResponse(request=request, name="login.html", context={"error": None})
-
-    @app.post("/login", response_class=HTMLResponse)
-    async def login_submit(request: Request):
-        form = await _form_data(request)
-        username = form.get("username", "").strip()
-        client_host = request.client.host if request.client else "unknown"
-        key = f"{client_host}|{username.casefold()}"
-        now = time.monotonic()
-        recent = [stamp for stamp in app.state.login_attempts.get(key, []) if now - stamp < 300]
-        app.state.login_attempts[key] = recent
-        if len(recent) >= 5:
-            return templates.TemplateResponse(
-                request=request, name="login.html",
-                context={"error": "Too many failed login attempts. Try again in a few minutes."}, status_code=429,
-            )
-
-        user = authenticate(database, username, form.get("password", ""))
-        if user is None:
-            recent.append(now)
-            app.state.login_attempts[key] = recent
-            return templates.TemplateResponse(
-                request=request, name="login.html",
-                context={"error": "Invalid username or password."}, status_code=401,
-            )
-
-        app.state.login_attempts.pop(key, None)
-        csrf_token = request.session.get("csrf_token") or secrets.token_urlsafe(32)
-        request.session.clear()
-        request.session["csrf_token"] = csrf_token
-        request.session["user_id"] = user.id
-        request.session["session_version"] = user.session_version
-        return RedirectResponse("/", status_code=303)
-
-    @app.post("/logout")
-    async def logout(request: Request):
-        await _form_data(request)
-        request.session.clear()
-        return RedirectResponse("/login", status_code=303)
-
-    @app.get("/admin/users", response_class=HTMLResponse)
-    def users_page(request: Request):
-        return templates.TemplateResponse(
-            request=request, name="users.html",
-            context={"users": list_users(database), "error": None},
-        )
-
-    @app.post("/admin/users", response_class=HTMLResponse)
-    async def users_create(request: Request):
-        form = await _form_data(request)
-        try:
-            create_user(
-                database,
-                form.get("username", ""),
-                form.get("password", ""),
-                is_admin=form.get("is_admin") == "yes",
-            )
-        except AuthError as exc:
-            return templates.TemplateResponse(
-                request=request, name="users.html",
-                context={"users": list_users(database), "error": str(exc)}, status_code=400,
-            )
-        return RedirectResponse("/admin/users", status_code=303)
-
-    @app.post("/admin/users/{user_id}/reset-password", response_class=HTMLResponse)
-    async def user_reset_password(request: Request, user_id: str):
-        form = await _form_data(request)
-        try:
-            reset_password(database, user_id, form.get("password", ""))
-        except AuthError as exc:
-            return templates.TemplateResponse(
-                request=request, name="users.html",
-                context={"users": list_users(database), "error": str(exc)}, status_code=400,
-            )
-        return RedirectResponse("/admin/users", status_code=303)
-
-    @app.post("/admin/users/{user_id}/toggle-active")
-    async def user_toggle_active(request: Request, user_id: str):
-        await _form_data(request)
-        target = next((u for u in list_users(database) if u.id == user_id), None)
-        if target is None:
-            raise HTTPException(status_code=404, detail="Account not found")
-        current = request.state.user
-        if target.id == current.id and target.active:
-            raise HTTPException(status_code=400, detail="You cannot disable your own account")
-        set_user_active(database, user_id, not target.active)
-        return RedirectResponse("/admin/users", status_code=303)
-
-    @app.post("/admin/users/{user_id}/toggle-admin")
-    async def user_toggle_admin(request: Request, user_id: str):
-        await _form_data(request)
-        target = next((u for u in list_users(database) if u.id == user_id), None)
-        if target is None:
-            raise HTTPException(status_code=404, detail="Account not found")
-        if target.id == request.state.user.id and target.is_admin:
-            raise HTTPException(status_code=400, detail="You cannot remove your own administrator access")
-        set_user_admin(database, user_id, not target.is_admin)
-        return RedirectResponse("/admin/users", status_code=303)
-
-    @app.get("/account/password", response_class=HTMLResponse)
-    def password_page(request: Request):
-        return templates.TemplateResponse(
-            request=request, name="change_password.html", context={"error": None, "success": None}
-        )
-
-    @app.post("/account/password", response_class=HTMLResponse)
-    async def password_save(request: Request):
-        form = await _form_data(request)
-        new_password = form.get("new_password", "")
-        if new_password != form.get("confirm_password", ""):
-            return templates.TemplateResponse(
-                request=request, name="change_password.html",
-                context={"error": "New passwords do not match.", "success": None}, status_code=400,
-            )
-        try:
-            user = change_password(
-                database,
-                request.state.user.id,
-                form.get("current_password", ""),
-                new_password,
-            )
-        except AuthError as exc:
-            return templates.TemplateResponse(
-                request=request, name="change_password.html",
-                context={"error": str(exc), "success": None}, status_code=400,
-            )
-        request.session["session_version"] = user.session_version
-        return templates.TemplateResponse(
-            request=request, name="change_password.html",
-            context={"error": None, "success": "Password changed. Other existing sessions for this account are now invalid."},
-        )
+    register_auth_routes(app, templates, database)
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):

@@ -9,7 +9,7 @@ from uuid import uuid4
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
 
-from .importer.commit import initialize_database
+from .database import connect_database
 
 
 class AuthError(RuntimeError):
@@ -28,13 +28,17 @@ class User:
 _hasher = PasswordHasher()
 
 
-def _connect(database_path: str | Path) -> sqlite3.Connection:
-    database = initialize_database(database_path)
-    db = sqlite3.connect(database)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
-    _ensure_auth_schema(db)
+def _connect(database_path: str | Path, *, ensure_schema: bool = False) -> sqlite3.Connection:
+    db = connect_database(database_path, row_factory=True)
+    if ensure_schema:
+        _ensure_auth_schema(db)
     return db
+
+
+def initialize_auth_database(database_path: str | Path) -> None:
+    """Create/migrate authentication tables at an application boundary."""
+    with _connect(database_path, ensure_schema=True):
+        pass
 
 
 def _ensure_auth_schema(db: sqlite3.Connection) -> None:
@@ -58,7 +62,7 @@ def _ensure_auth_schema(db: sqlite3.Connection) -> None:
 
 
 def get_or_create_session_secret(database_path: str | Path) -> str:
-    with _connect(database_path) as db:
+    with _connect(database_path, ensure_schema=True) as db:
         row = db.execute("SELECT value FROM app_settings WHERE key = 'session_secret'").fetchone()
         if row:
             return row["value"]
@@ -76,7 +80,7 @@ def create_user(database_path: str | Path, username: str, password: str, *, is_a
     user_id = str(uuid4())
     password_hash = _hasher.hash(password)
     try:
-        with _connect(database_path) as db:
+        with _connect(database_path, ensure_schema=True) as db:
             db.execute(
                 """INSERT INTO users(id, username, password_hash, is_admin, active, session_version)
                    VALUES (?, ?, ?, ?, 1, 0)""",

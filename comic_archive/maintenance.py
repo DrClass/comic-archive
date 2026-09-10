@@ -2,7 +2,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from .importer.commit import initialize_database
+from .database import connect_database
 from .thumbnails import thumbnail_path_for_media
 
 @dataclass(slots=True)
@@ -69,14 +69,14 @@ def _series_gaps_from_connection(db: sqlite3.Connection, series_id: str) -> list
 
 
 def series_gaps(database_path, series_id: str) -> list[Gap]:
-    database=initialize_database(database_path)
+    database=Path(database_path).expanduser().resolve()
     with sqlite3.connect(database) as db:
         db.row_factory=sqlite3.Row
         return _series_gaps_from_connection(db, series_id)
 
 def set_intentional_gap(database_path, series_id: str, issue_number: int, intentional: bool, note: str|None=None) -> None:
     if issue_number < 0: raise ValueError("Issue number must be non-negative")
-    database=initialize_database(database_path)
+    database=Path(database_path).expanduser().resolve()
     with sqlite3.connect(database) as db:
         if not db.execute("SELECT 1 FROM series WHERE id=?",(series_id,)).fetchone():
             raise ValueError("Series not found")
@@ -88,7 +88,7 @@ def set_intentional_gap(database_path, series_id: str, issue_number: int, intent
             db.execute("DELETE FROM intentional_missing_issues WHERE series_id=? AND issue_number=?",(series_id,issue_number))
 
 def build_maintenance_report(database_path, library_root) -> MaintenanceReport:
-    database=initialize_database(database_path)
+    database=Path(database_path).expanduser().resolve()
     library=Path(library_root).expanduser().resolve()
     report=MaintenanceReport()
     with sqlite3.connect(database) as db:

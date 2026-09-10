@@ -3277,3 +3277,31 @@ def test_deferred_workspace_ownership_rebuilds_before_staging(tmp_path: Path):
     assert session.workspace_cache_builds == builds_before + 1
     assert session.workspace_ownership_dirty is False
     assert sum(len(group.media) for issue in staged.issues for group in issue.groups) == 20
+
+
+def test_normal_requests_do_not_reinitialize_database(tmp_path: Path, monkeypatch):
+    database, library, _result = _make_library(tmp_path)
+    try:
+        create_user(database, "no-migrate-admin", "test-password-123", is_admin=True)
+    except Exception:
+        pass
+
+    import comic_archive.web as web_module
+
+    app = create_app(database, library, tmp_path / "staging")
+    client = TestClient(app)
+    response = _post(
+        client,
+        "/login",
+        data={"username": "no-migrate-admin", "password": "test-password-123"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    def fail_initialize(*_args, **_kwargs):
+        raise AssertionError("database initialization must not run during an ordinary request")
+
+    monkeypatch.setattr(web_module, "initialize_database", fail_initialize)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Example Artist" in response.text

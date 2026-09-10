@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .importer.commit import initialize_database
+from .database import connect_database
 
 
 @dataclass(slots=True)
@@ -100,9 +100,7 @@ def _bool_or_none(value: int | None) -> bool | None:
 
 
 def read_library(database_path: str | Path) -> list[AuthorView]:
-    database = initialize_database(database_path)
-    with sqlite3.connect(database) as db:
-        db.row_factory = sqlite3.Row
+    with connect_database(database_path, row_factory=True) as db:
         authors: list[AuthorView] = []
         for author_row in db.execute("SELECT id, name FROM authors ORDER BY name COLLATE NOCASE"):
             author = AuthorView(id=author_row["id"], name=author_row["name"])
