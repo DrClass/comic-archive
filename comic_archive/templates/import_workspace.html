@@ -33,7 +33,7 @@
         <a class="workspace-folder" href="/import/{{ session_id }}/review?folder={{ node.path|urlencode }}" style="padding-left: {{ node.depth * 1.15 }}rem">
           <span class="workspace-caret">{% if node.child_count %}▾{% else %}•{% endif %}</span>
           <strong>{{ node.name }}/</strong>
-          {% if node.direct_files %}<span class="muted">{{ node.direct_files }} file{% if node.direct_files != 1 %}s{% endif %}</span>{% endif %}
+          {% if node.direct_files %}<span class="muted">{{ node.direct_files }} page{% if node.direct_files != 1 %}s{% endif %}</span>{% endif %}
         </a>
         <form method="post" action="/import/{{ session_id }}/workspace/role" class="workspace-role-form">
           <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
@@ -433,21 +433,24 @@
       }
       if (!draggedNode || !target || target === draggedNode) return;
       event.preventDefault();
+      const draggedPath = draggedNode.dataset.path;
       const oldParent = draggedNode.dataset.parent;
+      const targetPath = target.dataset.path;
+      const targetParent = target.dataset.parent;
       const targetRect = target.getBoundingClientRect();
       const relativeY = (event.clientY - targetRect.top) / targetRect.height;
       try {
         await flushMetadata();
-        if (target.dataset.parent === oldParent && (relativeY < 0.28 || relativeY > 0.72)) {
+        if (targetParent === oldParent && (relativeY < 0.28 || relativeY > 0.72)) {
           const siblings = [...tree.querySelectorAll(`.workspace-node[data-parent="${CSS.escape(oldParent)}"]`)];
-          const order = siblings.map(row => row.dataset.path).filter(path => path !== draggedNode.dataset.path);
-          const targetIndex = order.indexOf(target.dataset.path);
-          order.splice(targetIndex + (relativeY > 0.72 ? 1 : 0), 0, draggedNode.dataset.path);
+          const order = siblings.map(row => row.dataset.path).filter(path => path !== draggedPath);
+          const targetIndex = order.indexOf(targetPath);
+          order.splice(targetIndex + (relativeY > 0.72 ? 1 : 0), 0, draggedPath);
           await post(`/import/${sessionId}/workspace/folder-order`, {parent: oldParent, ordered_paths: JSON.stringify(order)});
         } else {
-          await post(`/import/${sessionId}/workspace/move-node`, {folder_path: draggedNode.dataset.path, parent: target.dataset.path});
+          await post(`/import/${sessionId}/workspace/move-node`, {folder_path: draggedPath, parent: targetPath});
         }
-        location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(draggedNode.dataset.path)}`;
+        location.href = `/import/${sessionId}/review?folder=${encodeURIComponent(draggedPath)}`;
       } catch (error) { alert(error.message); location.reload(); }
     });
   }

@@ -2947,3 +2947,64 @@ def test_confirm_skip_locks_like_commit_and_commit_has_live_progress(tmp_path: P
     assert 'data-progress-url="/import/' in confirm.text
     assert 'class="skip-import-form import-processing-form"' not in confirm.text  # not bulk
     assert "import-progress-phase" in confirm.text
+
+
+def test_workspace_ui_uses_effective_nested_media_ownership_and_counts(tmp_path: Path):
+    source = tmp_path / "one-shot issue"
+    source.mkdir()
+    (source / "page1.png").write_bytes(b"page1")
+    (source / "page2.png").write_bytes(b"page2")
+    (source / "textless").mkdir()
+    (source / "textless" / "page1.png").write_bytes(b"textless")
+
+    client = _admin_client(tmp_path / "archive.sqlite3", tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": ".", "role": "issue"}, follow_redirects=False)
+    _post(client, f"/import/{session_id}/workspace/role", data={"folder_path": "textless", "role": "issue-extras"}, follow_redirects=False)
+
+    root_view = client.get(f"/import/{session_id}/review?folder=.")
+    assert root_view.status_code == 200
+    assert root_view.text.count('class="workspace-media-row') == 2
+    assert "2 pages" in root_view.text
+
+    extra_view = client.get(f"/import/{session_id}/review?folder=textless")
+    assert extra_view.status_code == 200
+    assert extra_view.text.count('class="workspace-media-row') == 1
+    assert "1 page" in extra_view.text
+
+
+def test_workspace_tree_counts_rendered_pdf_pages_not_source_pdf(tmp_path: Path):
+    import fitz
+
+    source = tmp_path / "PDF Comic"
+    source.mkdir()
+    pdf = source / "comic.pdf"
+    document = fitz.open()
+    for index in range(3):
+        page = document.new_page()
+        page.insert_text((72, 72), f"page {index + 1}")
+    document.save(pdf)
+    document.close()
+
+    client = _admin_client(tmp_path / "archive.sqlite3", tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+    workspace = client.get(response.headers["location"])
+    assert workspace.status_code == 200
+    assert "3 pages" in workspace.text
+    assert workspace.text.count('class="workspace-media-row') == 3
+
+
+def test_workspace_drag_script_captures_path_before_async_move(tmp_path: Path):
+    source = tmp_path / "Comic"
+    for path in ("Chapter 1/001.jpg", "Chapter 2/001.jpg"):
+        target = source / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.encode())
+    client = _admin_client(tmp_path / "archive.sqlite3", tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    workspace = client.get(response.headers["location"])
+    assert "const draggedPath = draggedNode.dataset.path;" in workspace.text
+    assert "encodeURIComponent(draggedPath)" in workspace.text
+    assert "encodeURIComponent(draggedNode.dataset.path)" not in workspace.text

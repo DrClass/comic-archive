@@ -643,3 +643,11 @@ Scanner hardening added two default guesses: a folder containing multiple PDFs a
 - Copy/thumbnail phases include current filename and file-count progress.
 - This makes unusually long imports diagnosable: the UI shows whether time is being spent hashing, copying, or generating thumbnails.
 - Full suite: 158 tests passed.
+
+## Milestone 37 — workspace visual consistency fixes
+
+- Workspace file/page pane now uses the same deepest-semantic-node ownership rules as staging, so pages assigned to nested Primary Pages or Extras folders are no longer also displayed under the parent Issue.
+- Tree counts now show effective imported page/media counts instead of physical source-file counts. Rendered PDF pages therefore count individually, and overlapping scanner groups do not inflate ancestor counts.
+- Fixed a drag/reparent race where `dragend` cleared the active DOM node before the asynchronous move completed, causing `Cannot read properties of null` after moving newly-created folders.
+- Added regressions for nested extras visual ownership, PDF rendered-page counts, and the drag/reparent race.
+- Full test suite: 161 passed.

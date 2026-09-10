@@ -663,6 +663,22 @@ def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> 
     for key in nodes_by_key:
         if key not in seen:
             visit(key, 1)
+
+    # Show effective media/page counts, not physical source-file counts. This is
+    # important for rendered PDFs (one source PDF may become many PNG pages) and
+    # for nested Primary Pages / Extras where ancestor scanner groups overlap.
+    counts = {str(node["path"]): 0 for node in result}
+    for media in _workspace_all_media(session):
+        media_path = str(media.path)
+        if media_path in session.workspace_ignored_media:
+            continue
+        owner = session.workspace_media_targets.get(media_path)
+        if owner is None:
+            owner = _workspace_origin_for_media_in_tree(session, media_path, result)
+        if owner in counts:
+            counts[owner] += 1
+    for node in result:
+        node["direct_files"] = counts.get(str(node["path"]), 0)
     return result
 
 
@@ -729,29 +745,35 @@ def _workspace_all_media(session: ImportSession) -> list[object]:
     return unique
 
 
-def _workspace_origin_for_media(session: ImportSession, media_path: str) -> str | None:
+def _workspace_origin_for_media_in_tree(session: ImportSession, media_path: str, tree: list[dict[str, object]]) -> str | None:
     # A scanned issue can contain media that also belongs to a more specific
-    # nested group (for example ``Issue/Textless``).  The old implementation
-    # returned the first matching ancestor, which made staging flatten that
-    # nested group back into the issue even when the workspace showed it as
-    # Issue-Extras/Primary Pages.  Prefer the deepest matching semantic node so
-    # the virtual tree remains authoritative.
+    # nested group (for example ``Issue/Textless``). Prefer the deepest matching
+    # semantic node so both the workspace UI and staging use the same ownership.
     matches: list[tuple[int, int, str]] = []
     role_rank = {
         "Issue-Extras": 5, "Series-Extras": 5, "Primary Pages": 4,
         "Issue": 3, "Sub-Series": 2, "Series": 1,
     }
-    for node in _workspace_tree(session, include_virtual=False):
+    for node in tree:
+        if node.get("virtual"):
+            continue
         if node["is_root"] and node["role"] not in {"Issue", "Primary Pages"}:
+            continue
+        role = str(node.get("role"))
+        if role not in role_rank:
             continue
         for media in _workspace_media_for_folder_base(session, str(node["path"])):
             if str(media.path) == media_path:
-                matches.append((int(node.get("depth", 0)), role_rank.get(str(node.get("role")), 0), str(node["path"])))
+                matches.append((int(node.get("depth", 0)), role_rank.get(role, 0), str(node["path"])))
                 break
     if not matches:
         return None
     matches.sort(reverse=True)
     return matches[0][2]
+
+
+def _workspace_origin_for_media(session: ImportSession, media_path: str) -> str | None:
+    return _workspace_origin_for_media_in_tree(session, media_path, _workspace_tree(session, include_virtual=False))
 
 
 def _workspace_media_targets_for_folder(session: ImportSession, folder_key: str) -> list[tuple[str, str]]:
@@ -821,20 +843,16 @@ def _workspace_media_for_folder_base(session: ImportSession, folder_key: str) ->
 
 
 def _workspace_media_for_folder(session: ImportSession, folder_key: str) -> list[object]:
-    if folder_key.startswith("virtual:") or folder_key.startswith("synthetic:"):
-        return [
-            item for item in _workspace_all_media(session)
-            if session.workspace_media_targets.get(str(item.path)) == folder_key
-        ]
-    base = _workspace_media_for_folder_base(session, folder_key)
-    result = [
-        item for item in base
-        if session.workspace_media_targets.get(str(item.path), folder_key) == folder_key
-    ]
-    # Include pages explicitly moved here from another group.
-    existing = {str(item.path) for item in result}
+    # Render exactly the same effective ownership that staging uses. Explicit
+    # drag/drop targets win; otherwise choose the deepest semantic source node.
+    tree = _workspace_tree(session)
+    result = []
     for item in _workspace_all_media(session):
-        if session.workspace_media_targets.get(str(item.path)) == folder_key and str(item.path) not in existing:
+        media_path = str(item.path)
+        owner = session.workspace_media_targets.get(media_path)
+        if owner is None:
+            owner = _workspace_origin_for_media_in_tree(session, media_path, tree)
+        if owner == folder_key:
             result.append(item)
     result.sort(key=lambda item: item.order)
     return result
