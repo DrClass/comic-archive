@@ -3190,3 +3190,24 @@ def test_seeded_pdf_issue_keeps_pages_after_metadata_rename_and_cache_rebuild(tm
     rebuilt_issue = next(node for node in rebuilt if str(node["path"]) == issue_key)
     assert rebuilt_issue["name"] == "Issue 7"
     assert len(_workspace_media_for_folder(session, issue_key)) == 2
+
+
+def test_workspace_finalize_exposes_descriptive_staging_progress(tmp_path: Path):
+    source = tmp_path / "incoming" / "Comic"
+    source.mkdir(parents=True)
+    (source / "001.jpg").write_bytes(b"one")
+    database = tmp_path / "archive.sqlite3"
+    client = _admin_client(database, tmp_path / "library", tmp_path / "staging")
+    response = _post(client, "/import/scan", data={"source_path": str(source)}, follow_redirects=False)
+    session_id = response.headers["location"].split("/")[2]
+
+    finalized = _post(
+        client,
+        f"/import/{session_id}/workspace/finalize",
+        data={"author": "Artist", "series": "Comic", "series_complete": "", "selected": "."},
+        follow_redirects=False,
+    )
+    assert finalized.status_code == 303
+    progress = client.get(f"/import/{session_id}/staging-progress").json()
+    assert progress["phase"] == "complete"
+    assert progress["detail"] == "Validation complete"

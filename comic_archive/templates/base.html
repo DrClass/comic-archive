@@ -295,10 +295,13 @@
         const phaseLabel = form.querySelector('.import-progress-phase');
         const detailLabel = form.querySelector('.import-progress-detail');
         const labels = {
-          starting: 'Starting import…', validating: 'Validating source files…',
-          database: 'Preparing database…', hashing: 'Hashing files / checking duplicates…',
-          copying: 'Copying media…', thumbnailing: 'Generating thumbnails…',
-          finalizing: 'Finalizing database…', complete: 'Done…', waiting: 'Waiting to start…'
+          starting: 'Starting…', workspace: 'Preparing workspace…',
+          structure: 'Building issue structure…', ownership: 'Resolving media ownership…',
+          groups: 'Building media groups…', validating: 'Validating import…',
+          saving: 'Writing staging record…', database: 'Preparing database…',
+          hashing: 'Hashing files / checking duplicates…', copying: 'Copying media…',
+          thumbnailing: 'Generating thumbnails…', finalizing: 'Finalizing database…',
+          complete: 'Done…', error: 'Validation failed', waiting: 'Waiting to start…'
         };
         const poll = async () => {
           try {
@@ -308,7 +311,7 @@
             if (phaseLabel) phaseLabel.textContent = labels[data.phase] || data.phase || 'Working…';
             if (detailLabel) detailLabel.textContent = data.detail || '';
             if (bar) {
-              if (data.total > 0 && ['copying', 'thumbnailing', 'finalizing', 'complete'].includes(data.phase)) {
+              if (data.total > 0) {
                 bar.max = data.total;
                 bar.value = Math.min(data.current || 0, data.total);
               } else {

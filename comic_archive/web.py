@@ -11,7 +11,7 @@ import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import parse_qs
 from uuid import uuid4
 
@@ -51,14 +51,43 @@ MAX_BROWSER_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024
 logger = logging.getLogger("comic_archive.web")
 
 
-def _process_rss_mib() -> float | None:
+def _process_memory_snapshot() -> dict[str, float | int | None]:
+    values: dict[str, float | int | None] = {
+        "rss_mib": None, "anon_mib": None, "file_mib": None,
+        "vmsize_mib": None, "threads": None,
+    }
     try:
         for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) / 1024.0
+            key, _, rest = line.partition(":")
+            parts = rest.split()
+            if key == "Threads" and parts:
+                values["threads"] = int(parts[0])
+            elif key in {"VmRSS", "RssAnon", "RssFile", "VmSize"} and parts:
+                mapped = {"VmRSS": "rss_mib", "RssAnon": "anon_mib", "RssFile": "file_mib", "VmSize": "vmsize_mib"}[key]
+                values[mapped] = int(parts[0]) / 1024.0
     except (OSError, ValueError, IndexError):
-        return None
-    return None
+        pass
+    return values
+
+
+def _process_rss_mib() -> float | None:
+    value = _process_memory_snapshot().get("rss_mib")
+    return float(value) if value is not None else None
+
+
+def _log_memory_checkpoint(label: str, **context: object) -> None:
+    memory = _process_memory_snapshot()
+    suffix = " ".join(f"{key}={value}" for key, value in context.items())
+    logger.info(
+        "memory checkpoint label=%s rss_mib=%s anon_mib=%s file_mib=%s vmsize_mib=%s threads=%s%s%s",
+        label,
+        f"{memory['rss_mib']:.1f}" if isinstance(memory['rss_mib'], float) else "unknown",
+        f"{memory['anon_mib']:.1f}" if isinstance(memory['anon_mib'], float) else "unknown",
+        f"{memory['file_mib']:.1f}" if isinstance(memory['file_mib'], float) else "unknown",
+        f"{memory['vmsize_mib']:.1f}" if isinstance(memory['vmsize_mib'], float) else "unknown",
+        memory['threads'] if memory['threads'] is not None else "unknown",
+        " " if suffix else "", suffix,
+    )
 
 
 async def _run_background_io(func, /, *args, **kwargs):
@@ -822,6 +851,8 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
 
     # This is the one expensive ownership pass. It happens after ingestion or a
     # real workspace edit, never merely because the user clicked another folder.
+    cache_started = time.monotonic()
+    _log_memory_checkpoint("workspace-cache-start", cache_build=session.workspace_cache_builds + 1)
     tree = _workspace_tree_uncached(session)
     media_items = _workspace_all_media(session)
     media_index = {str(item.path): item for item in media_items}
@@ -846,6 +877,14 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
     session.workspace_cached_media_index = media_index
     session.workspace_cache_signature = signature
     session.workspace_cache_builds += 1
+    logger.info(
+        "workspace cache built build=%d nodes=%d media=%d folders=%d elapsed=%.2fs",
+        session.workspace_cache_builds, len(tree), len(media_items), len(by_folder), time.monotonic() - cache_started,
+    )
+    _log_memory_checkpoint(
+        "workspace-cache-complete", cache_build=session.workspace_cache_builds,
+        nodes=len(tree), media=len(media_items), folders=len(by_folder),
+    )
 
 
 def _workspace_tree(session: ImportSession, *, include_virtual: bool = True) -> list[dict[str, object]]:
@@ -1067,12 +1106,21 @@ def _workspace_sorted_review_items(session: ImportSession, role: ReviewRole) -> 
 
 
 
-def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
+def _workspace_build_staged_import(
+    session: ImportSession,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+) -> StagedImport:
+    def report(phase: str, current: int, total: int, detail: str) -> None:
+        if progress_callback is not None:
+            progress_callback(phase, current, total, detail)
+
+    report("workspace", 0, 0, "Preparing workspace tree")
     tree = _workspace_tree(session)
     if not tree:
         raise StagingError("Import workspace is empty")
     nodes = {str(node["path"]): node for node in tree}
     root_path = str(tree[0]["path"])
+    report("workspace", len(tree), len(tree), f"Prepared {len(tree):,} workspace folders")
 
     def ancestors(path: str):
         current = str(nodes.get(path, {}).get("parent") or "")
@@ -1162,6 +1210,8 @@ def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
         ))
         series_key_by_path[path] = path
 
+    report("structure", len(staged.subseries), len(staged.subseries), f"Built {len(staged.subseries):,} sub-series")
+
     issue_by_path: dict[str, StagedIssue] = {}
     issue_counter: dict[str, int] = {}
     for node in tree:
@@ -1190,6 +1240,8 @@ def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
         staged.issues.append(issue)
         issue_by_path[path] = issue
 
+    report("structure", len(staged.issues), len(staged.issues), f"Built {len(staged.issues):,} issues")
+
     # A traditional one-shot scan starts with the root as Issue. The virtual
     # tree model requires a logical Series container; preserve compatibility by
     # synthesizing one issue when the logical root itself still has primary media
@@ -1212,9 +1264,12 @@ def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
         )
 
     # Accumulate media by semantic virtual folder.
+    report("ownership", 0, 0, "Resolving media ownership")
+    all_media = _workspace_all_media(session)
     buckets: dict[str, list[object]] = {}
     unassigned: list[str] = []
-    for item in _workspace_all_media(session):
+    total_media = len(all_media)
+    for media_index, item in enumerate(all_media, start=1):
         source = str(item.path)
         if source in session.workspace_ignored_media:
             continue
@@ -1229,11 +1284,14 @@ def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
             buckets.setdefault(target, []).append(item)
         else:
             unassigned.append(str(item.relative_path))
+        if media_index % 1000 == 0 or media_index == total_media:
+            report("ownership", media_index, total_media, f"Resolved {media_index:,} of {total_media:,} media files")
     if unassigned:
         preview = ", ".join(unassigned[:5])
         more = f" (+{len(unassigned)-5} more)" if len(unassigned) > 5 else ""
         raise StagingError(f"Files need a destination or must be ignored: {preview}{more}")
 
+    report("groups", 0, len(buckets), f"Building groups from {len(buckets):,} media destinations")
     primary_by_issue: dict[str, list[object]] = {path: [] for path in issue_by_path}
     extra_specs: list[tuple[dict[str, object], list[object]]] = []
     series_extra_specs: list[tuple[dict[str, object], list[object]]] = []
@@ -1262,6 +1320,7 @@ def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
                 raise StagingError(f"Series extras folder {node['name']} must be inside a Series")
             series_extra_specs.append((node, media_items))
 
+    report("validating", 0, len(issue_by_path), f"Validating {len(issue_by_path):,} issues")
     for issue_path, issue in issue_by_path.items():
         media_items = primary_by_issue.get(issue_path, [])
         if not media_items:
@@ -1304,6 +1363,8 @@ def _workspace_build_staged_import(session: ImportSession) -> StagedImport:
             media=[staged_media(item, index) for index, item in enumerate(sorted(media_items, key=lambda x: x.order), 1)],
         ))
 
+    group_count = sum(len(issue.groups) for issue in staged.issues) + len(staged.series_extras)
+    report("complete", total_media, total_media, f"Staging model ready: {len(staged.issues):,} issues, {group_count:,} groups, {total_media:,} media files")
     return staged
 
 
@@ -1942,6 +2003,7 @@ def create_app(
     app.state.bulk_import_sessions: dict[str, BulkArtistSession] = {}
     app.state.login_attempts: dict[str, list[float]] = {}
     app.state.import_progress: dict[str, dict[str, object]] = {}
+    app.state.staging_progress: dict[str, dict[str, object]] = {}
     app.state.last_upload_sweep = 0.0
 
     @app.middleware("http")
@@ -2257,6 +2319,7 @@ def create_app(
 
         top_level = _upload_top_level(upload)
         source_path = _uploaded_source(upload.upload_root, top_level)
+        _log_memory_checkpoint("upload-transfer-complete", upload_id=upload_id, files=len(upload.received_paths))
         try:
             if upload.mode == "bulk":
                 logger.info("bulk discovery started upload_id=%s source=%s", upload_id, source_path)
@@ -2274,16 +2337,23 @@ def create_app(
                 redirect = f"/import/bulk/{bulk_id}"
             else:
                 pdf_cache_root = _new_pdf_cache(staging, upload.upload_root)
-                logger.info("scan requested upload_id=%s source=%s rss_mib=%s", upload_id, source_path, f"{_process_rss_mib():.1f}" if _process_rss_mib() is not None else "unknown")
+                logger.info("scan requested upload_id=%s source=%s", upload_id, source_path)
+                _log_memory_checkpoint("scan-start", upload_id=upload_id)
+                last_scan_phase: list[str | None] = [None]
                 def scan_progress(phase: str, current: int, total: int, message: str) -> None:
                     upload.scan_progress = {"phase": phase, "current": current, "total": total, "message": message}
-                    if phase in {"indexing", "classifying", "complete"}:
+                    if phase != last_scan_phase[0] or (current > 0 and (current == total or current % 5000 == 0)):
                         logger.info("scan progress upload_id=%s phase=%s current=%d total=%d message=%s", upload_id, phase, current, total, message)
+                        _log_memory_checkpoint(f"scan-{phase}", upload_id=upload_id, current=current, total=total)
+                        last_scan_phase[0] = phase
 
                 scan = await _run_background_io(scan_folder, source_path, pdf_cache_root=pdf_cache_root, progress=scan_progress)
+                _log_memory_checkpoint("scan-complete", upload_id=upload_id)
                 upload.scan_progress = {"phase": "review", "current": 0, "total": 0, "message": "Building review workspace"}
+                _log_memory_checkpoint("review-plan-start", upload_id=upload_id)
                 plan = await _run_background_io(build_review_plan, scan)
-                logger.info("review plan complete upload_id=%s rss_mib=%s", upload_id, f"{_process_rss_mib():.1f}" if _process_rss_mib() is not None else "unknown")
+                logger.info("review plan complete upload_id=%s items=%d", upload_id, len(plan.items))
+                _log_memory_checkpoint("review-plan-complete", upload_id=upload_id, review_items=len(plan.items))
                 session_id = str(uuid4())
                 app.state.import_sessions[session_id] = ImportSession(
                     plan=plan,
@@ -2299,6 +2369,7 @@ def create_app(
         app.state.upload_sessions.pop(upload_id, None)
         _delete_browser_upload_session_state(app, upload_id)
         logger.info("upload finalized id=%s mode=%s redirect=%s", upload_id, upload.mode, redirect)
+        _log_memory_checkpoint("upload-finalized", upload_id=upload_id, mode=upload.mode)
         return JSONResponse({"redirect": redirect})
 
     @app.get("/import/bulk", response_class=HTMLResponse)
@@ -2900,13 +2971,60 @@ def create_app(
             if title and item is not None and str(node["role"]) in {"Sub-Series", "Issue-Extras", "Series-Extras"}:
                 item.name = title
 
+        stage_started = time.monotonic()
+        last_phase: list[str | None] = [None]
+
+        def report_stage_progress(phase: str, current: int, total: int, detail: str) -> None:
+            app.state.staging_progress[session_id] = {
+                "phase": phase, "current": current, "total": total, "detail": detail,
+                "updated_at": time.time(),
+            }
+            # Log phase transitions plus periodic large ownership steps without
+            # flooding journald for every media item.
+            if phase != last_phase[0] or (total > 0 and current > 0 and (current == total or current % 5000 == 0)):
+                logger.info(
+                    "stage progress session_id=%s phase=%s current=%d total=%d detail=%s elapsed=%.2fs",
+                    session_id, phase, current, total, detail, time.monotonic() - stage_started,
+                )
+                _log_memory_checkpoint(
+                    f"stage-{phase}", session_id=session_id, current=current, total=total,
+                    tree_nodes=len(session.workspace_cached_tree or []),
+                    cache_media=len(session.workspace_cached_media_index),
+                )
+                last_phase[0] = phase
+
+        app.state.staging_progress[session_id] = {
+            "phase": "starting", "current": 0, "total": 0,
+            "detail": "Starting validation", "updated_at": time.time(),
+        }
+        _log_memory_checkpoint("stage-start", session_id=session_id)
         try:
-            staged = _workspace_build_staged_import(session)
+            staged = await _run_background_io(
+                _workspace_build_staged_import, session, report_stage_progress
+            )
+            report_stage_progress("saving", 0, 0, "Writing staging record")
             staging.mkdir(parents=True, exist_ok=True)
-            staging_path = staged.save(staging / f"{staged.staging_id}.json")
+            staging_path = await _run_background_io(staged.save, staging / f"{staged.staging_id}.json")
             session.staged = staged
             session.staging_path = staging_path
+            app.state.staging_progress[session_id] = {
+                "phase": "complete", "current": 1, "total": 1,
+                "detail": "Validation complete", "updated_at": time.time(),
+            }
+            logger.info(
+                "stage complete session_id=%s issues=%d subseries=%d media=%d elapsed=%.2fs",
+                session_id, len(staged.issues), len(staged.subseries),
+                sum(len(group.media) for issue in staged.issues for group in issue.groups) + sum(len(group.media) for group in staged.series_extras),
+                time.monotonic() - stage_started,
+            )
+            _log_memory_checkpoint("stage-complete", session_id=session_id)
         except (StagingError, ReviewError) as exc:
+            app.state.staging_progress[session_id] = {
+                "phase": "error", "current": 0, "total": 0,
+                "detail": str(exc), "updated_at": time.time(),
+            }
+            logger.warning("stage failed session_id=%s elapsed=%.2fs error=%s", session_id, time.monotonic() - stage_started, exc)
+            _log_memory_checkpoint("stage-error", session_id=session_id)
             tree = _workspace_tree(session)
             requested = form.get("selected", "")
             selected = requested if any(str(node["path"]) == requested for node in tree) else str(tree[0]["path"])
@@ -3331,6 +3449,13 @@ def create_app(
             },
         )
 
+    @app.get("/import/{session_id}/staging-progress")
+    def import_staging_progress(session_id: str):
+        progress = app.state.staging_progress.get(session_id)
+        if progress is None:
+            return {"phase": "waiting", "current": 0, "total": 0, "detail": "Waiting to start"}
+        return progress
+
     @app.get("/import/{session_id}/commit-progress")
     def import_commit_progress(session_id: str):
         progress = app.state.import_progress.get(session_id)
@@ -3353,16 +3478,26 @@ def create_app(
         form = await _form_data(request)
         _touch_import_activity(app, session)
         allow_duplicate = form.get("allow_duplicate") == "yes"
+        commit_started = time.monotonic()
+        last_commit_phase: list[str | None] = [None]
         def report_progress(phase: str, current: int, total: int, detail: str) -> None:
             app.state.import_progress[session_id] = {
                 "phase": phase, "current": current, "total": total, "detail": detail,
                 "updated_at": time.time(),
             }
+            if phase != last_commit_phase[0] or (total > 0 and current > 0 and (current == total or current % 1000 == 0)):
+                logger.info(
+                    "commit progress session_id=%s phase=%s current=%d total=%d detail=%s elapsed=%.2fs",
+                    session_id, phase, current, total, detail, time.monotonic() - commit_started,
+                )
+                _log_memory_checkpoint(f"commit-{phase}", session_id=session_id, current=current, total=total)
+                last_commit_phase[0] = phase
 
         app.state.import_progress[session_id] = {
             "phase": "starting", "current": 0, "total": 0,
             "detail": "Starting import", "updated_at": time.time(),
         }
+        _log_memory_checkpoint("commit-start", session_id=session_id)
         try:
             result = await asyncio.to_thread(
                 commit_staged_import,
