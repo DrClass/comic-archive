@@ -1945,6 +1945,51 @@ def test_resumable_upload_session_accepts_files_individually_and_finalizes(tmp_p
     assert root.exists()  # ownership transferred to the import session
 
 
+def test_resumable_upload_session_restores_after_server_restart(tmp_path: Path):
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    upload_id = _create_browser_upload(client, mode="single", expected_files=2)
+    first = _send_browser_upload_file(client, upload_id, "Restart Comic/001.jpg", b"one")
+    assert first.status_code == 200
+
+    state_file = staging / "session_state" / f"browser_upload_{upload_id}.json"
+    assert state_file.is_file()
+    root = client.app.state.upload_sessions[upload_id].upload_root
+
+    # Simulate a service restart: in-memory sessions disappear, disk state remains.
+    client.app.state.upload_sessions.clear()
+
+    second = _send_browser_upload_file(client, upload_id, "Restart Comic/002.jpg", b"two")
+    assert second.status_code == 200, second.text
+    assert second.json()["received_files"] == 2
+    assert upload_id in client.app.state.upload_sessions
+    assert (root / "content" / "Restart Comic" / "001.jpg").read_bytes() == b"one"
+    assert (root / "content" / "Restart Comic" / "002.jpg").read_bytes() == b"two"
+
+    finalized = _post(client, f"/import/upload-session/{upload_id}/finalize")
+    assert finalized.status_code == 200, finalized.text
+    assert not state_file.exists()
+
+
+def test_resumable_upload_retry_of_received_file_restores_after_restart(tmp_path: Path):
+    database = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    staging = tmp_path / "staging"
+    client = _admin_client(database, library, staging)
+
+    upload_id = _create_browser_upload(client, mode="single", expected_files=1)
+    sent = _send_browser_upload_file(client, upload_id, "Restart Retry/001.jpg", b"page")
+    assert sent.status_code == 200
+    client.app.state.upload_sessions.clear()
+
+    retry = _send_browser_upload_file(client, upload_id, "Restart Retry/001.jpg", b"page")
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["received_files"] == 1
+
+
 def test_resumable_upload_repeated_file_is_idempotent(tmp_path: Path):
     database = tmp_path / "archive.sqlite3"
     library = tmp_path / "library"

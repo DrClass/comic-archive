@@ -288,14 +288,70 @@ def _safe_upload_relative(filename: str) -> Path:
     return Path(*relative.parts)
 
 
+def _persist_browser_upload_session(app: FastAPI, upload_id: str, session: BrowserUploadSession) -> None:
+    _atomic_json_write(_session_state_path(app, "browser_upload", upload_id), {
+        "version": 1,
+        "upload_root": str(session.upload_root),
+        "mode": session.mode,
+        "expected_files": session.expected_files,
+        "received_paths": sorted(session.received_paths),
+        "last_activity": session.last_activity,
+        "cancelled": session.cancelled,
+    })
+
+
+def _restore_browser_upload_session(app: FastAPI, upload_id: str) -> BrowserUploadSession | None:
+    path = _session_state_path(app, "browser_upload", upload_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        last_activity = float(data.get("last_activity", 0))
+        if time.time() - last_activity >= UPLOAD_INACTIVITY_SECONDS:
+            path.unlink(missing_ok=True)
+            return None
+        expected_root = (app.state.staging_root / "uploads" / upload_id).resolve()
+        upload_root = Path(data["upload_root"]).resolve()
+        if upload_root != expected_root or not (upload_root / "content").is_dir():
+            return None
+        mode = str(data["mode"] )
+        expected_files = int(data["expected_files"] )
+        if mode not in {"single", "bulk"} or expected_files < 1 or expected_files > 100000:
+            return None
+        session = BrowserUploadSession(
+            upload_root=upload_root,
+            mode=mode,
+            expected_files=expected_files,
+            received_paths={str(value) for value in data.get("received_paths", [])},
+            last_activity=last_activity,
+            cancelled=bool(data.get("cancelled", False)),
+        )
+        if session.cancelled:
+            return None
+        app.state.upload_sessions[upload_id] = session
+        return session
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _delete_browser_upload_session_state(app: FastAPI, upload_id: str) -> None:
+    try:
+        _session_state_path(app, "browser_upload", upload_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _upload_session_or_404(app: FastAPI, upload_id: str) -> BrowserUploadSession:
     session = app.state.upload_sessions.get(upload_id)
+    if session is None:
+        session = _restore_browser_upload_session(app, upload_id)
     if session is not None and time.time() - session.last_activity >= UPLOAD_INACTIVITY_SECONDS:
         app.state.upload_sessions.pop(upload_id, None)
+        _delete_browser_upload_session_state(app, upload_id)
         _cleanup_upload(session.upload_root)
         session = None
     if session is None:
-        raise HTTPException(status_code=404, detail="Upload session expired, was cleaned up, or the server was restarted")
+        raise HTTPException(status_code=404, detail="Upload session expired or was cleaned up after 12 hours of inactivity")
     return session
 
 
@@ -1471,6 +1527,7 @@ def _cleanup_stale_imports(app: FastAPI, staging_root: Path, *, now: float | Non
     upload_roots_to_delete: set[Path] = set()
     for upload_id in stale_upload_ids:
         upload = app.state.upload_sessions.pop(upload_id, None)
+        _delete_browser_upload_session_state(app, upload_id)
         if upload is not None:
             upload_roots_to_delete.add(upload.upload_root)
 
@@ -2085,12 +2142,14 @@ def create_app(
         )
         app.state.upload_sessions[upload_id] = session
         _touch_browser_upload(session)
+        _persist_browser_upload_session(app, upload_id, session)
         return JSONResponse({"upload_id": upload_id, "expected_files": expected_files})
 
     @app.post("/import/upload-session/{upload_id}/file", response_class=JSONResponse)
     async def upload_session_file(request: Request, upload_id: str):
         upload = _upload_session_or_404(app, upload_id)
         relative = await _save_upload_file(request, upload)
+        _persist_browser_upload_session(app, upload_id, upload)
         return JSONResponse({
             "relative_path": relative,
             "received_files": len(upload.received_paths),
@@ -2103,6 +2162,7 @@ def create_app(
         upload = _upload_session_or_404(app, upload_id)
         upload.cancelled = True
         app.state.upload_sessions.pop(upload_id, None)
+        _delete_browser_upload_session_state(app, upload_id)
         _cleanup_upload(upload.upload_root)
         return JSONResponse({"cancelled": True})
 
@@ -2111,6 +2171,7 @@ def create_app(
         await _form_data(request)
         upload = _upload_session_or_404(app, upload_id)
         _touch_browser_upload(upload)
+        _persist_browser_upload_session(app, upload_id, upload)
         if len(upload.received_paths) != upload.expected_files:
             return JSONResponse(
                 {
@@ -2153,6 +2214,7 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=400)
 
         app.state.upload_sessions.pop(upload_id, None)
+        _delete_browser_upload_session_state(app, upload_id)
         return JSONResponse({"redirect": redirect})
 
     @app.get("/import/bulk", response_class=HTMLResponse)
