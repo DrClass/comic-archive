@@ -393,3 +393,38 @@ def test_scan_progress_reports_index_and_completion(tmp_path: Path) -> None:
     assert events[0][0] == "indexing"
     assert any(event[0] == "classifying" for event in events)
     assert events[-1][0] == "complete"
+
+
+def test_indexed_scan_does_not_reenumerate_directories_after_index(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "No Rewalk Comic"
+    for issue in range(1, 5):
+        for page in range(1, 8):
+            touch(source / f"Issue {issue}" / f"{page:03}.jpg")
+    touch(source / "Issue 1" / "Extras" / "bonus.png")
+
+    def fail_iterdir(*args, **kwargs):
+        raise AssertionError("classification must use ScanIndex rather than Path.iterdir()")
+
+    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
+    result = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+    assert result.is_series_candidate
+    assert len(result.issues) == 4
+
+
+def test_scan_progress_reports_finalizing_phase(tmp_path: Path) -> None:
+    source = tmp_path / "Progress Detail Comic"
+    for issue in range(1, 3):
+        for page in range(1, 4):
+            touch(source / f"Issue {issue}" / f"{page:03}.jpg")
+    phases = []
+
+    scan_folder(
+        source,
+        pdf_cache_root=tmp_path / "pdf-cache",
+        progress=lambda phase, current, total, message: phases.append(phase),
+    )
+
+    assert "indexing" in phases
+    assert "classifying" in phases
+    assert "finalizing" in phases
+    assert phases[-1] == "complete"
