@@ -39,6 +39,7 @@ from .routes.library import register_library_routes
 from .routes.editing import register_editing_routes
 from .routes.maintenance import register_maintenance_routes
 from .routes.media import register_media_routes
+from .routes.import_uploads import ImportUploadRouteDeps, register_import_upload_routes
 from .library_views import (
     series_lineage as _series_lineage,
 )
@@ -1866,137 +1867,35 @@ def create_app(
 
     register_media_routes(app, database, library)
 
-    @app.post("/import/upload-session", response_class=JSONResponse)
-    async def create_upload_session(request: Request):
-        form = await _form_data(request)
-        mode = form.get("mode", "single").strip()
-        if mode not in {"single", "bulk"}:
-            raise HTTPException(status_code=400, detail="Invalid upload mode")
-        try:
-            expected_files = int(form.get("expected_files", "0"))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid file count") from exc
-        if expected_files < 1 or expected_files > 100000:
-            raise HTTPException(status_code=400, detail="File count must be between 1 and 100000")
-
-        upload_id = str(uuid4())
-        upload_root = staging / "uploads" / upload_id
-        (upload_root / "content").mkdir(parents=True, exist_ok=False)
-        session = BrowserUploadSession(
-            upload_root=upload_root,
-            mode=mode,
-            expected_files=expected_files,
-        )
-        app.state.upload_sessions[upload_id] = session
-        _touch_browser_upload(session)
-        _persist_browser_upload_session(app, upload_id, session)
-        logger.info("upload session created id=%s mode=%s expected_files=%d root=%s", upload_id, mode, expected_files, upload_root)
-        return JSONResponse({"upload_id": upload_id, "expected_files": expected_files})
-
-    @app.post("/import/upload-session/{upload_id}/file", response_class=JSONResponse)
-    async def upload_session_file(request: Request, upload_id: str):
-        upload = _upload_session_or_404(app, upload_id)
-        relative = await _save_upload_file(request, upload)
-        _checkpoint_browser_upload_session(app, upload_id, upload)
-        elapsed = max(0.001, time.monotonic() - upload.started_at)
-        throughput_mib_s = upload.uploaded_bytes / (1024 * 1024) / elapsed
-        return JSONResponse({
-            "relative_path": relative,
-            "received_files": len(upload.received_paths),
-            "expected_files": upload.expected_files,
-            "throughput_mib_s": round(throughput_mib_s, 2),
-        })
-
-    @app.get("/import/upload-session/{upload_id}/status", response_class=JSONResponse)
-    async def upload_session_status(request: Request, upload_id: str):
-        upload = _upload_session_or_404(app, upload_id)
-        return JSONResponse({
-            "received_files": len(upload.received_paths),
-            "expected_files": upload.expected_files,
-            "scan": upload.scan_progress,
-        })
-
-    @app.post("/import/upload-session/{upload_id}/cancel", response_class=JSONResponse)
-    async def cancel_upload_session(request: Request, upload_id: str):
-        await _form_data(request)
-        upload = _upload_session_or_404(app, upload_id)
-        upload.cancelled = True
-        app.state.upload_sessions.pop(upload_id, None)
-        _delete_browser_upload_session_state(app, upload_id)
-        _cleanup_upload(upload.upload_root)
-        return JSONResponse({"cancelled": True})
-
-    @app.post("/import/upload-session/{upload_id}/finalize", response_class=JSONResponse)
-    async def finalize_upload_session(request: Request, upload_id: str):
-        await _form_data(request)
-        upload = _upload_session_or_404(app, upload_id)
-        _touch_browser_upload(upload)
-        _checkpoint_browser_upload_session(app, upload_id, upload, force=True)
-        if len(upload.received_paths) != upload.expected_files:
-            return JSONResponse(
-                {
-                    "error": (
-                        f"Upload is incomplete: received {len(upload.received_paths)} "
-                        f"of {upload.expected_files} files."
-                    )
-                },
-                status_code=409,
-            )
-
-        top_level = _upload_top_level(upload)
-        source_path = _uploaded_source(upload.upload_root, top_level)
-        _log_memory_checkpoint("upload-transfer-complete", upload_id=upload_id, files=len(upload.received_paths))
-        try:
-            if upload.mode == "bulk":
-                logger.info("bulk discovery started upload_id=%s source=%s", upload_id, source_path)
-                upload.scan_progress = {"phase": "discovering", "current": 0, "total": 0, "message": "Discovering comics"}
-                source, candidates = await _run_background_io(discover_artist_comics, source_path)
-                logger.info("bulk discovery complete upload_id=%s candidates=%d", upload_id, len(candidates))
-                bulk_id = str(uuid4())
-                app.state.bulk_import_sessions[bulk_id] = BulkArtistSession(
-                    source=source,
-                    author=source.name,
-                    candidates=candidates,
-                    upload_root=upload.upload_root,
-                )
-                _touch_bulk_activity(app, app.state.bulk_import_sessions[bulk_id])
-                redirect = f"/import/bulk/{bulk_id}"
-            else:
-                pdf_cache_root = _new_pdf_cache(staging, upload.upload_root)
-                logger.info("scan requested upload_id=%s source=%s", upload_id, source_path)
-                _log_memory_checkpoint("scan-start", upload_id=upload_id)
-                last_scan_phase: list[str | None] = [None]
-                def scan_progress(phase: str, current: int, total: int, message: str) -> None:
-                    upload.scan_progress = {"phase": phase, "current": current, "total": total, "message": message}
-                    if phase != last_scan_phase[0] or (current > 0 and (current == total or current % 1000 == 0)):
-                        logger.info("scan progress upload_id=%s phase=%s current=%d total=%d message=%s", upload_id, phase, current, total, message)
-                        _log_memory_checkpoint(f"scan-{phase}", upload_id=upload_id, current=current, total=total)
-                        last_scan_phase[0] = phase
-
-                scan = await _run_background_io(scan_folder, source_path, pdf_cache_root=pdf_cache_root, progress=scan_progress)
-                _log_memory_checkpoint("scan-complete", upload_id=upload_id)
-                upload.scan_progress = {"phase": "review", "current": 0, "total": 0, "message": "Building review workspace"}
-                _log_memory_checkpoint("review-plan-start", upload_id=upload_id)
-                plan = await _run_background_io(build_review_plan, scan)
-                logger.info("review plan complete upload_id=%s items=%d", upload_id, len(plan.items))
-                _log_memory_checkpoint("review-plan-complete", upload_id=upload_id, review_items=len(plan.items))
-                session_id = str(uuid4())
-                app.state.import_sessions[session_id] = ImportSession(
-                    plan=plan,
-                    series_default=scan.content_root.name,
-                    upload_root=upload.upload_root,
-                    pdf_cache_root=pdf_cache_root,
-                )
-                _touch_import_activity(app, app.state.import_sessions[session_id])
-                redirect = f"/import/{session_id}/review"
-        except (FolderScanError, OSError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-
-        app.state.upload_sessions.pop(upload_id, None)
-        _delete_browser_upload_session_state(app, upload_id)
-        logger.info("upload finalized id=%s mode=%s redirect=%s", upload_id, upload.mode, redirect)
-        _log_memory_checkpoint("upload-finalized", upload_id=upload_id, mode=upload.mode)
-        return JSONResponse({"redirect": redirect})
+    register_import_upload_routes(
+        app,
+        ImportUploadRouteDeps(
+            staging_root=staging,
+            form_data=_form_data,
+            browser_upload_session=BrowserUploadSession,
+            touch_browser_upload=_touch_browser_upload,
+            persist_browser_upload_session=_persist_browser_upload_session,
+            upload_session_or_404=_upload_session_or_404,
+            save_upload_file=_save_upload_file,
+            checkpoint_browser_upload_session=_checkpoint_browser_upload_session,
+            delete_browser_upload_session_state=_delete_browser_upload_session_state,
+            cleanup_upload=_cleanup_upload,
+            upload_top_level=_upload_top_level,
+            uploaded_source=_uploaded_source,
+            log_memory_checkpoint=_log_memory_checkpoint,
+            run_background_io=_run_background_io,
+            discover_artist_comics=discover_artist_comics,
+            bulk_artist_session=BulkArtistSession,
+            touch_bulk_activity=_touch_bulk_activity,
+            new_pdf_cache=_new_pdf_cache,
+            scan_folder=scan_folder,
+            build_review_plan=build_review_plan,
+            import_session=ImportSession,
+            touch_import_activity=_touch_import_activity,
+            folder_scan_error=FolderScanError,
+            logger=logger,
+        ),
+    )
 
     @app.get("/import/bulk", response_class=HTMLResponse)
     def bulk_import_start(request: Request, folder: str = ""):
