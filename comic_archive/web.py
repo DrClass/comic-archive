@@ -40,6 +40,7 @@ from .routes.editing import register_editing_routes
 from .routes.maintenance import register_maintenance_routes
 from .routes.media import register_media_routes
 from .routes.import_uploads import ImportUploadRouteDeps, register_import_upload_routes
+from .routes.import_review import ImportReviewRouteDeps, register_import_review_routes
 from .library_views import (
     series_lineage as _series_lineage,
 )
@@ -1897,254 +1898,42 @@ def create_app(
         ),
     )
 
-    @app.get("/import/bulk", response_class=HTMLResponse)
-    def bulk_import_start(request: Request, folder: str = ""):
-        selected = _safe_import_folder(imports, folder) if folder else None
-        return templates.TemplateResponse(
-            request=request,
-            name="import_bulk_start.html",
-            context={
-                "error": None,
-                "selected_path": folder,
-                "selected_label": str(selected.relative_to(imports)) if selected else None,
-                "import_root": imports,
-            },
-        )
-
-    @app.post("/import/bulk/upload", response_class=HTMLResponse)
-    async def bulk_import_upload(request: Request):
-        upload_root: Path | None = None
-        try:
-            upload_root, top_level = await _save_uploaded_folder(request, staging)
-            source_path = _uploaded_source(upload_root, top_level)
-            source, candidates = discover_artist_comics(source_path)
-        except HTTPException:
-            _cleanup_upload(upload_root)
-            raise
-        except (FolderScanError, OSError) as exc:
-            _cleanup_upload(upload_root)
-            return templates.TemplateResponse(
-                request=request,
-                name="import_bulk_start.html",
-                context={"error": str(exc)},
-                status_code=400,
-            )
-
-        bulk_id = str(uuid4())
-        app.state.bulk_import_sessions[bulk_id] = BulkArtistSession(
-            source=source,
-            author=source.name,
-            candidates=candidates,
-            upload_root=upload_root,
-        )
-        _touch_bulk_activity(app, app.state.bulk_import_sessions[bulk_id])
-        return RedirectResponse(f"/import/bulk/{bulk_id}", status_code=303)
-
-    @app.post("/import/bulk/scan", response_class=HTMLResponse)
-    async def bulk_import_scan(request: Request):
-        form = await _form_data(request)
-        selected_path = form.get("selected_path", "").strip() or form.get("source_path", "").strip()
-        try:
-            source_path = _safe_import_folder(imports, selected_path)
-            source, candidates = discover_artist_comics(source_path)
-        except (FolderScanError, OSError) as exc:
-            return templates.TemplateResponse(
-                request=request,
-                name="import_bulk_start.html",
-                context={"error": str(exc), "selected_path": selected_path},
-                status_code=400,
-            )
-        bulk_id = str(uuid4())
-        app.state.bulk_import_sessions[bulk_id] = BulkArtistSession(
-            source=source,
-            author=form.get("author", "").strip() or source.name,
-            candidates=candidates,
-        )
-        _touch_bulk_activity(app, app.state.bulk_import_sessions[bulk_id])
-        return RedirectResponse(f"/import/bulk/{bulk_id}", status_code=303)
-
-    @app.get("/import/bulk/{bulk_id}", response_class=HTMLResponse)
-    def bulk_import_choose(request: Request, bulk_id: str):
-        bulk = _bulk_session_or_404(app, bulk_id)
-        _touch_bulk_activity(app, bulk)
-        return templates.TemplateResponse(
-            request=request,
-            name="import_bulk_choose.html",
-            context={"bulk_id": bulk_id, "bulk": bulk, "error": None},
-        )
-
-    @app.post("/import/bulk/{bulk_id}/start", response_class=HTMLResponse)
-    async def bulk_import_begin(request: Request, bulk_id: str):
-        bulk = _bulk_session_or_404(app, bulk_id)
-        form = await _form_data(request)
-        selected = [
-            index for index in range(len(bulk.candidates))
-            if form.get(f"comic_{index}") == "yes"
-        ]
-        author = form.get("author", "").strip()
-        if not author:
-            return templates.TemplateResponse(
-                request=request,
-                name="import_bulk_choose.html",
-                context={"bulk_id": bulk_id, "bulk": bulk, "error": "Author is required."},
-                status_code=400,
-            )
-        if not selected:
-            return templates.TemplateResponse(
-                request=request,
-                name="import_bulk_choose.html",
-                context={"bulk_id": bulk_id, "bulk": bulk, "error": "Choose at least one comic folder."},
-                status_code=400,
-            )
-        bulk.author = author
-        bulk.selected = selected
-        bulk.current_position = 0
-        bulk.imported_series.clear()
-        bulk.skipped_series.clear()
-        _touch_bulk_activity(app, bulk)
-        try:
-            session_id = _start_bulk_item(app, bulk_id)
-        except (FolderScanError, OSError) as exc:
-            return templates.TemplateResponse(
-                request=request,
-                name="import_bulk_choose.html",
-                context={"bulk_id": bulk_id, "bulk": bulk, "error": str(exc)},
-                status_code=400,
-            )
-        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
-
-    @app.get("/import/bulk/{bulk_id}/done", response_class=HTMLResponse)
-    def bulk_import_done(request: Request, bulk_id: str):
-        bulk = _bulk_session_or_404(app, bulk_id)
-        return templates.TemplateResponse(
-            request=request,
-            name="import_bulk_done.html",
-            context={"bulk": bulk},
-        )
-
-    @app.get("/import", response_class=HTMLResponse)
-    def import_start(request: Request, folder: str = ""):
-        selected = _safe_import_folder(imports, folder) if folder else None
-        return templates.TemplateResponse(
-            request=request,
-            name="import_start.html",
-            context={
-                "error": None,
-                "selected_path": folder,
-                "selected_label": str(selected.relative_to(imports)) if selected else None,
-                "import_root": imports,
-            },
-        )
-
-    @app.get("/import/browse", response_class=HTMLResponse)
-    def import_browse(request: Request, path: str = ".", mode: str = "single"):
-        if mode not in {"single", "bulk"}:
-            raise HTTPException(status_code=400, detail="Invalid folder-browser mode")
-        current, relative, folders, parent = _import_folder_listing(imports, path)
-        return templates.TemplateResponse(
-            request=request,
-            name="import_browse.html",
-            context={
-                "mode": mode,
-                "current": current,
-                "relative": relative,
-                "folders": folders,
-                "parent": parent,
-                "import_root": imports,
-                "select_url": "/import/bulk" if mode == "bulk" else "/import",
-            },
-        )
-
-    @app.post("/import/upload", response_class=HTMLResponse)
-    async def import_upload(request: Request):
-        upload_root: Path | None = None
-        try:
-            upload_root, top_level = await _save_uploaded_folder(request, staging)
-            source_path = _uploaded_source(upload_root, top_level)
-            pdf_cache_root = _new_pdf_cache(staging, upload_root)
-            scan = scan_folder(source_path, pdf_cache_root=pdf_cache_root)
-            plan = build_review_plan(scan)
-        except HTTPException:
-            _cleanup_upload(upload_root)
-            raise
-        except (FolderScanError, OSError) as exc:
-            _cleanup_upload(upload_root)
-            return templates.TemplateResponse(
-                request=request,
-                name="import_start.html",
-                context={"error": str(exc)},
-                status_code=400,
-            )
-
-        session_id = str(uuid4())
-        app.state.import_sessions[session_id] = ImportSession(
-            plan=plan,
-            series_default=scan.content_root.name,
-            upload_root=upload_root,
-            pdf_cache_root=pdf_cache_root,
-        )
-        _touch_import_activity(app, app.state.import_sessions[session_id])
-        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
-
-    @app.post("/import/scan", response_class=HTMLResponse)
-    async def import_scan(request: Request):
-        form = await _form_data(request)
-        selected_path = form.get("selected_path", "").strip() or form.get("source_path", "").strip()
-        try:
-            source_path = _safe_import_folder(imports, selected_path)
-            pdf_cache_root = _new_pdf_cache(staging)
-            scan = scan_folder(source_path, pdf_cache_root=pdf_cache_root)
-            plan = build_review_plan(scan)
-        except (FolderScanError, OSError) as exc:
-            return templates.TemplateResponse(request=request, name="import_start.html", context={"error": str(exc), "selected_path": selected_path}, status_code=400)
-        session_id = str(uuid4())
-        app.state.import_sessions[session_id] = ImportSession(plan=plan, pdf_cache_root=pdf_cache_root)
-        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
-
-    @app.get("/import/{session_id}/review", response_class=HTMLResponse)
-    def import_review(request: Request, session_id: str):
-        if _load_completed_import(app, session_id) is not None:
-            return RedirectResponse(f"/import/{session_id}/done", status_code=303)
-        session = _session_or_404(app, session_id)
-        _touch_import_activity(app, session)
-        tree = _workspace_tree(session)
-        requested = request.query_params.get("folder", "")
-        selected = requested if any(node["path"] == requested for node in tree) else str(tree[0]["path"])
-        selected_node = next(node for node in tree if node["path"] == selected)
-        media = _workspace_media_for_folder(session, selected)
-        media_total = len(media)
-        try:
-            media_offset = max(0, int(request.query_params.get("media_offset", "0")))
-        except ValueError:
-            media_offset = 0
-        media_page_size = 250
-        if media_offset >= media_total and media_total:
-            media_offset = max(0, ((media_total - 1) // media_page_size) * media_page_size)
-        media_page = media[media_offset:media_offset + media_page_size]
-        media_targets = _workspace_media_targets_for_folder(session, selected)
-        return templates.TemplateResponse(
-            request=request,
-            name="import_workspace.html",
-            context={
-                "session_id": session_id,
-                "plan": session.plan,
-                "tree": tree,
-                "selected": selected,
-                "selected_node": selected_node,
-                "selected_media": media_page,
-                "selected_media_total": media_total,
-                "selected_media_offset": media_offset,
-                "selected_media_page_size": media_page_size,
-                "selected_metadata": _workspace_node_metadata(session, selected_node),
-                "media_targets": media_targets,
-                "media_target_paths": {path for path, _ in media_targets},
-                "author_value": session.workspace_author if session.workspace_author is not None else (session.author_default or ""),
-                "series_value": session.workspace_series if session.workspace_series is not None else (session.series_default or session.plan.scan.content_root.name),
-                "series_complete_value": session.workspace_series_complete,
-                "ignored_media": session.workspace_ignored_media,
-                "errors": [],
-            },
-        )
+    register_import_review_routes(
+        app,
+        ImportReviewRouteDeps(
+            import_root=imports,
+            staging_root=staging,
+            templates=templates,
+            form_data=_form_data,
+            safe_import_folder=_safe_import_folder,
+            import_folder_listing=_import_folder_listing,
+            save_uploaded_folder=_save_uploaded_folder,
+            uploaded_source=_uploaded_source,
+            cleanup_upload=_cleanup_upload,
+            discover_artist_comics=discover_artist_comics,
+            bulk_artist_session=BulkArtistSession,
+            touch_bulk_activity=_touch_bulk_activity,
+            bulk_session_or_404=_bulk_session_or_404,
+            start_bulk_item=_start_bulk_item,
+            new_pdf_cache=_new_pdf_cache,
+            scan_folder=scan_folder,
+            build_review_plan=build_review_plan,
+            import_session=ImportSession,
+            touch_import_activity=_touch_import_activity,
+            session_or_404=_session_or_404,
+            load_completed_import=_load_completed_import,
+            workspace_tree=_workspace_tree,
+            workspace_media_for_folder=_workspace_media_for_folder,
+            workspace_media_targets_for_folder=_workspace_media_targets_for_folder,
+            workspace_node_metadata=_workspace_node_metadata,
+            flattened_folder_candidates=flattened_folder_candidates,
+            rescan_import_session=_rescan_import_session,
+            review_role_choices=_review_role_choices,
+            review_source_relative=_review_source_relative,
+            review_error=ReviewError,
+            folder_scan_error=FolderScanError,
+        ),
+    )
 
     @app.post("/import/{session_id}/workspace/metadata")
     async def import_workspace_metadata(request: Request, session_id: str):
@@ -2663,83 +2452,6 @@ def create_app(
         _workspace_reorder_media(session, ordered)
         _workspace_invalidate_cache(session)
         return Response(status_code=204)
-
-    @app.post("/import/{session_id}/review/mark-extra", response_class=HTMLResponse)
-    async def import_review_mark_extra(request: Request, session_id: str):
-        session = _session_or_404(app, session_id)
-        form = await _form_data(request)
-        _touch_import_activity(app, session)
-        relative_path = form.get("folder_path", "").strip()
-        candidates = {str(item.relative_path): item for item in flattened_folder_candidates(session.plan.scan)}
-        if relative_path not in candidates:
-            raise HTTPException(status_code=400, detail="Folder is not an available flattened folder")
-        session.extra_folder_overrides.add(relative_path)
-        try:
-            _rescan_import_session(session)
-        except (FolderScanError, OSError) as exc:
-            session.extra_folder_overrides.discard(relative_path)
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
-
-    @app.post("/import/{session_id}/review/mark-subseries", response_class=HTMLResponse)
-    async def import_review_mark_subseries(request: Request, session_id: str):
-        session = _session_or_404(app, session_id)
-        form = await _form_data(request)
-        _touch_import_activity(app, session)
-        relative_path = form.get("folder_path", "").strip()
-        if not relative_path:
-            raise HTTPException(status_code=400, detail="Missing folder path")
-        candidate = (session.plan.scan.source / relative_path).resolve()
-        try:
-            candidate.relative_to(session.plan.scan.source)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid folder path") from exc
-        if not candidate.is_dir():
-            raise HTTPException(status_code=400, detail="Sub-series folder not found")
-        session.subseries_folder_overrides.add(relative_path)
-        try:
-            _rescan_import_session(session)
-        except (FolderScanError, OSError) as exc:
-            session.subseries_folder_overrides.discard(relative_path)
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/import/{session_id}/review", status_code=303)
-
-    @app.post("/import/{session_id}/review", response_class=HTMLResponse)
-    async def import_review_save(request: Request, session_id: str):
-        session = _session_or_404(app, session_id)
-        form = await _form_data(request)
-        _touch_import_activity(app, session)
-        errors: list[str] = []
-        for index, item in enumerate(session.plan.items):
-            try:
-                session.plan.set_name(item.relative_path, form.get(f"name_{index}", item.name))
-                session.plan.set_role(item.relative_path, form.get(f"role_{index}", item.role.value))
-            except ReviewError as exc:
-                errors.append(str(exc))
-        errors.extend(session.plan.validation_errors())
-        if errors:
-            role_choices = {
-                index: _review_role_choices(item, is_series=session.plan.scan.is_series_candidate)
-                for index, item in enumerate(session.plan.items)
-            }
-            return templates.TemplateResponse(
-                request=request,
-                name="import_review.html",
-                context={
-                    "session_id": session_id, "plan": session.plan, "role_choices": role_choices, "errors": errors,
-                    "flattened_folders": [
-                        item for item in flattened_folder_candidates(session.plan.scan)
-                        if str(item.relative_path) not in session.extra_folder_overrides
-                    ],
-                    "subseries_candidates": {
-                        index: _review_source_relative(session.plan.scan, item.relative_path)
-                        for index, item in enumerate(session.plan.items)
-                        if item.source_kind == "issue"
-                    },
-                },
-                status_code=400,
-            )
-        return RedirectResponse(f"/import/{session_id}/metadata", status_code=303)
 
     @app.get("/import/{session_id}/metadata", response_class=HTMLResponse)
     def import_metadata(request: Request, session_id: str):
