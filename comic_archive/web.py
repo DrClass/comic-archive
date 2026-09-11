@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import json
 import secrets
 import time
 import shutil
-import logging
-import threading
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, replace
-from pathlib import Path, PurePosixPath
+from dataclasses import replace
+from pathlib import Path
 from typing import Callable, Iterable
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from starlette.datastructures import UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -49,20 +45,15 @@ from .library_views import (
 from .web_forms import form_data as _form_data, check_csrf_value as _check_csrf_value, bool_form as _bool_form
 from .services.import_sessions import (
     ImportSession, BulkArtistSession,
-    atomic_json_write as _atomic_json_write,
-    session_state_path as _session_state_path,
     persist_import_session as _persist_import_session,
-    restore_import_session as _restore_import_session,
     delete_import_session_state as _delete_import_session_state,
     save_completed_import as _save_completed_import,
     load_completed_import as _load_completed_import,
     persist_bulk_session as _persist_bulk_session,
-    restore_bulk_session as _restore_bulk_session,
     delete_bulk_session_state as _delete_bulk_session_state,
     rescan_import_session as _rescan_import_session,
     touch_import_activity as _touch_import_activity,
     touch_bulk_activity as _touch_bulk_activity,
-    touch_upload_root as _touch_upload_root,
     remove_staging_record as _remove_staging_record_service,
     cleanup_stale_imports as _cleanup_stale_imports_service,
     session_or_404 as _session_or_404_service,
@@ -70,391 +61,36 @@ from .services.import_sessions import (
 )
 
 
+from .services.diagnostics import (
+    configure_diagnostic_logging as _configure_diagnostic_logging,
+    log_memory_checkpoint as _log_memory_checkpoint,
+    run_background_io as _run_background_io,
+    logger,
+)
+from .services.uploads import (
+    BrowserUploadSession,
+    UPLOAD_STATE_CHECKPOINT_FILES,
+    UPLOAD_WRITE_BUFFER_BYTES,
+    persist_browser_upload_session as _persist_browser_upload_session,
+    checkpoint_browser_upload_session as _checkpoint_browser_upload_session,
+    delete_browser_upload_session_state as _delete_browser_upload_session_state,
+    upload_session_or_404 as _upload_session_or_404,
+    touch_browser_upload as _touch_browser_upload,
+    save_upload_file as _save_upload_file,
+    upload_top_level as _upload_top_level,
+    save_uploaded_folder as _save_uploaded_folder,
+    uploaded_source as _uploaded_source,
+    cleanup_upload as _cleanup_upload,
+    new_pdf_cache as _new_pdf_cache,
+)
+
 _TEMPLATE_DIR = Path(__file__).with_name("templates")
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
-UPLOAD_INACTIVITY_SECONDS = 12 * 60 * 60
-UPLOAD_SWEEP_INTERVAL_SECONDS = 60 * 60
-MAX_BROWSER_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024
-UPLOAD_STATE_CHECKPOINT_FILES = 25
-UPLOAD_STATE_CHECKPOINT_SECONDS = 2.0
-UPLOAD_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
-logger = logging.getLogger("comic_archive.web")
-
-
-def _configure_diagnostic_logging() -> None:
-    """Ensure importer diagnostics always reach stderr/journald at INFO."""
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    if not any(getattr(handler, "_comic_archive_diag", False) for handler in logger.handlers):
-        handler = logging.StreamHandler()
-        handler._comic_archive_diag = True  # type: ignore[attr-defined]
-        handler.setLevel(logging.INFO)
-        handler.setFormatter(logging.Formatter("CA_DIAG %(message)s"))
-        logger.addHandler(handler)
-
-
 _configure_diagnostic_logging()
 
+UPLOAD_SWEEP_INTERVAL_SECONDS = 60 * 60
 
-def _process_memory_snapshot() -> dict[str, float | int | None]:
-    values: dict[str, float | int | None] = {
-        "rss_mib": None, "anon_mib": None, "file_mib": None,
-        "vmsize_mib": None, "threads": None,
-    }
-    try:
-        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
-            key, _, rest = line.partition(":")
-            parts = rest.split()
-            if key == "Threads" and parts:
-                values["threads"] = int(parts[0])
-            elif key in {"VmRSS", "RssAnon", "RssFile", "VmSize"} and parts:
-                mapped = {"VmRSS": "rss_mib", "RssAnon": "anon_mib", "RssFile": "file_mib", "VmSize": "vmsize_mib"}[key]
-                values[mapped] = int(parts[0]) / 1024.0
-    except (OSError, ValueError, IndexError):
-        pass
-    return values
-
-
-def _process_rss_mib() -> float | None:
-    value = _process_memory_snapshot().get("rss_mib")
-    return float(value) if value is not None else None
-
-
-def _log_memory_checkpoint(label: str, **context: object) -> None:
-    memory = _process_memory_snapshot()
-    suffix = " ".join(f"{key}={value}" for key, value in context.items())
-    logger.info(
-        "memory checkpoint label=%s rss_mib=%s anon_mib=%s file_mib=%s vmsize_mib=%s threads=%s%s%s",
-        label,
-        f"{memory['rss_mib']:.1f}" if isinstance(memory['rss_mib'], float) else "unknown",
-        f"{memory['anon_mib']:.1f}" if isinstance(memory['anon_mib'], float) else "unknown",
-        f"{memory['file_mib']:.1f}" if isinstance(memory['file_mib'], float) else "unknown",
-        f"{memory['vmsize_mib']:.1f}" if isinstance(memory['vmsize_mib'], float) else "unknown",
-        memory['threads'] if memory['threads'] is not None else "unknown",
-        " " if suffix else "", suffix,
-    )
-
-
-async def _run_background_io(func, /, *args, **kwargs):
-    """Run one long import operation without blocking ASGI or holding process shutdown open.
-
-    Import scans are coarse, infrequent jobs. A short-lived daemon thread avoids
-    tying the single Uvicorn event loop to filesystem/PDF work and also avoids
-    per-TestClient executor threads lingering after tests finish.
-    """
-    loop = asyncio.get_running_loop()
-    future = loop.create_future()
-
-    def runner() -> None:
-        try:
-            result = func(*args, **kwargs)
-        except BaseException as exc:
-            loop.call_soon_threadsafe(future.set_exception, exc)
-        else:
-            loop.call_soon_threadsafe(future.set_result, result)
-
-    thread = threading.Thread(target=runner, name=f"comic-archive-{getattr(func, '__name__', 'worker')}", daemon=True)
-    thread.start()
-    return await future
-
-
-@dataclass
-class BrowserUploadSession:
-    upload_root: Path
-    mode: str
-    expected_files: int
-    received_paths: set[str] = field(default_factory=set)
-    last_activity: float = field(default_factory=time.time)
-    cancelled: bool = False
-    scan_progress: dict[str, object] = field(default_factory=dict)
-    last_persisted_count: int = 0
-    last_persisted_at: float = field(default_factory=time.monotonic)
-    uploaded_bytes: int = 0
-    started_at: float = field(default_factory=time.monotonic)
-
-
-
-def _safe_upload_relative(filename: str) -> Path:
-    normalized = filename.replace("\\", "/").lstrip("/")
-    relative = PurePosixPath(normalized)
-    if not normalized or relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-        raise HTTPException(status_code=400, detail="Invalid uploaded folder path")
-    return Path(*relative.parts)
-
-
-def _persist_browser_upload_session(app: FastAPI, upload_id: str, session: BrowserUploadSession) -> None:
-    _atomic_json_write(_session_state_path(app, "browser_upload", upload_id), {
-        "version": 1,
-        "upload_root": str(session.upload_root),
-        "mode": session.mode,
-        "expected_files": session.expected_files,
-        "received_paths": sorted(session.received_paths),
-        "last_activity": session.last_activity,
-        "cancelled": session.cancelled,
-        "scan_progress": session.scan_progress,
-    })
-
-
-
-
-def _reconcile_browser_upload_files(session: BrowserUploadSession) -> None:
-    """Recover completed files from disk after a process restart.
-
-    Browser upload state is checkpointed periodically for throughput. Completed
-    files written since the last checkpoint are authoritative on disk and are
-    added back to received_paths here. .part files are deliberately ignored.
-    """
-    content_root = session.upload_root / "content"
-    if not content_root.is_dir():
-        return
-    recovered: set[str] = set()
-    for root, _dirs, files in __import__("os").walk(content_root):
-        root_path = Path(root)
-        for name in files:
-            if name.endswith(".part"):
-                continue
-            path = root_path / name
-            try:
-                relative = path.relative_to(content_root).as_posix()
-            except ValueError:
-                continue
-            recovered.add(relative)
-    if recovered:
-        session.received_paths.update(recovered)
-
-
-def _checkpoint_browser_upload_session(app: FastAPI, upload_id: str, session: BrowserUploadSession, *, force: bool = False) -> None:
-    now = time.monotonic()
-    count = len(session.received_paths)
-    if not force:
-        if count - session.last_persisted_count < UPLOAD_STATE_CHECKPOINT_FILES and now - session.last_persisted_at < UPLOAD_STATE_CHECKPOINT_SECONDS:
-            return
-    _persist_browser_upload_session(app, upload_id, session)
-    session.last_persisted_count = count
-    session.last_persisted_at = now
-
-
-def _restore_browser_upload_session(app: FastAPI, upload_id: str) -> BrowserUploadSession | None:
-    path = _session_state_path(app, "browser_upload", upload_id)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        last_activity = float(data.get("last_activity", 0))
-        if time.time() - last_activity >= UPLOAD_INACTIVITY_SECONDS:
-            path.unlink(missing_ok=True)
-            return None
-        expected_root = (app.state.staging_root / "uploads" / upload_id).resolve()
-        upload_root = Path(data["upload_root"]).resolve()
-        if upload_root != expected_root or not (upload_root / "content").is_dir():
-            return None
-        mode = str(data["mode"] )
-        expected_files = int(data["expected_files"] )
-        if mode not in {"single", "bulk"} or expected_files < 1 or expected_files > 100000:
-            return None
-        session = BrowserUploadSession(
-            upload_root=upload_root,
-            mode=mode,
-            expected_files=expected_files,
-            received_paths={str(value) for value in data.get("received_paths", [])},
-            last_activity=last_activity,
-            cancelled=bool(data.get("cancelled", False)),
-            scan_progress=dict(data.get("scan_progress", {})),
-        )
-        if session.cancelled:
-            return None
-        _reconcile_browser_upload_files(session)
-        session.last_persisted_count = len(session.received_paths)
-        session.last_persisted_at = time.monotonic()
-        app.state.upload_sessions[upload_id] = session
-        return session
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return None
-
-
-def _delete_browser_upload_session_state(app: FastAPI, upload_id: str) -> None:
-    try:
-        _session_state_path(app, "browser_upload", upload_id).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _upload_session_or_404(app: FastAPI, upload_id: str) -> BrowserUploadSession:
-    session = app.state.upload_sessions.get(upload_id)
-    if session is None:
-        session = _restore_browser_upload_session(app, upload_id)
-    if session is not None and time.time() - session.last_activity >= UPLOAD_INACTIVITY_SECONDS:
-        app.state.upload_sessions.pop(upload_id, None)
-        _delete_browser_upload_session_state(app, upload_id)
-        _cleanup_upload(session.upload_root)
-        session = None
-    if session is None:
-        raise HTTPException(status_code=404, detail="Upload session expired or was cleaned up after 12 hours of inactivity")
-    return session
-
-
-def _touch_browser_upload(session: BrowserUploadSession) -> None:
-    session.last_activity = time.time()
-    _touch_upload_root(session.upload_root, session.last_activity)
-
-
-async def _save_upload_file(request: Request, session: BrowserUploadSession) -> str:
-    if session.cancelled:
-        raise HTTPException(status_code=409, detail="Upload session was cancelled")
-
-    _check_csrf_value(request, request.headers.get("x-csrf-token", ""))
-    relative_text = request.query_params.get("relative_path", "").strip()
-    if not relative_text:
-        raise HTTPException(status_code=400, detail="Missing relative_path")
-    relative = _safe_upload_relative(relative_text)
-    normalized = relative.as_posix()
-
-    expected_size_text = request.headers.get("x-file-size", "")
-    try:
-        expected_size = int(expected_size_text) if expected_size_text else None
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid X-File-Size header") from exc
-    if expected_size is not None and (expected_size < 0 or expected_size > MAX_BROWSER_UPLOAD_FILE_BYTES):
-        raise HTTPException(status_code=413, detail="File exceeds the 16 GiB browser-upload limit")
-
-    content_root = session.upload_root / "content"
-    destination = (content_root / relative).resolve()
-    try:
-        destination.relative_to(content_root.resolve())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid uploaded folder path") from exc
-
-    if normalized in session.received_paths and destination.is_file():
-        _touch_browser_upload(session)
-        logger.info("upload retry already complete path=%s received=%d/%d", normalized, len(session.received_paths), session.expected_files)
-        return normalized
-    if normalized not in session.received_paths and len(session.received_paths) >= session.expected_files:
-        raise HTTPException(status_code=409, detail="Upload session already received its expected number of files")
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".part")
-    received_bytes = 0
-    started = time.monotonic()
-    try:
-        with temporary.open("wb") as target:
-            pending = bytearray()
-            async for chunk in request.stream():
-                if not chunk:
-                    continue
-                received_bytes += len(chunk)
-                if received_bytes > MAX_BROWSER_UPLOAD_FILE_BYTES:
-                    raise HTTPException(status_code=413, detail="File exceeds the 16 GiB browser-upload limit")
-                if expected_size is not None and received_bytes > expected_size:
-                    raise HTTPException(status_code=400, detail="Received more bytes than declared by X-File-Size")
-                pending.extend(chunk)
-                if len(pending) >= UPLOAD_WRITE_BUFFER_BYTES:
-                    payload = bytes(pending)
-                    pending.clear()
-                    await asyncio.to_thread(target.write, payload)
-            if pending:
-                await asyncio.to_thread(target.write, bytes(pending))
-        if expected_size is not None and received_bytes != expected_size:
-            raise HTTPException(status_code=400, detail=f"Incomplete upload body: received {received_bytes} of {expected_size} bytes")
-        if session.cancelled:
-            temporary.unlink(missing_ok=True)
-            _cleanup_upload(session.upload_root)
-            raise HTTPException(status_code=409, detail="Upload session was cancelled")
-        temporary.replace(destination)
-        session.received_paths.add(normalized)
-        session.uploaded_bytes += received_bytes
-        _touch_browser_upload(session)
-        count = len(session.received_paths)
-        elapsed = time.monotonic() - started
-        if count == 1 or count == session.expected_files or count % 100 == 0 or received_bytes >= 100 * 1024 * 1024:
-            logger.info(
-                "upload progress path=%s bytes=%d elapsed=%.2fs received=%d/%d rss_mib=%s",
-                normalized, received_bytes, elapsed, count, session.expected_files,
-                f"{_process_rss_mib():.1f}" if _process_rss_mib() is not None else "unknown",
-            )
-        return normalized
-    except Exception as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-        logger.exception("upload file failed path=%s bytes_received=%d expected_size=%s", normalized, received_bytes, expected_size)
-        raise
-    finally:
-        if session.cancelled:
-            _cleanup_upload(session.upload_root)
-
-
-def _upload_top_level(session: BrowserUploadSession) -> str | None:
-    top_levels = {
-        Path(relative).parts[0]
-        for relative in session.received_paths
-        if Path(relative).parts
-    }
-    return next(iter(top_levels)) if len(top_levels) == 1 else None
-
-
-async def _save_uploaded_folder(request: Request, staging_root: Path) -> tuple[Path, str | None]:
-    """Backward-compatible whole-folder endpoint used by older clients/tests.
-
-    The browser UI uses the resumable upload-session endpoints instead.
-    """
-    form = await request.form(max_files=100000, max_fields=1000)
-    _check_csrf_value(request, str(form.get("csrf_token", "")))
-    files = [item for item in form.getlist("files") if isinstance(item, UploadFile)]
-    if not files:
-        raise HTTPException(status_code=400, detail="Choose a folder containing files.")
-
-    upload_root = staging_root / "uploads" / str(uuid4())
-    content_root = upload_root / "content"
-    content_root.mkdir(parents=True, exist_ok=False)
-    top_levels: set[str] = set()
-    try:
-        for upload in files:
-            relative = _safe_upload_relative(upload.filename or "")
-            top_levels.add(relative.parts[0])
-            destination = (content_root / relative).resolve()
-            try:
-                destination.relative_to(content_root.resolve())
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail="Invalid uploaded folder path") from exc
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("wb") as target:
-                while True:
-                    chunk = await upload.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    target.write(chunk)
-            await upload.close()
-        top_level = next(iter(top_levels)) if len(top_levels) == 1 else None
-        return upload_root, top_level
-    except Exception:
-        shutil.rmtree(upload_root, ignore_errors=True)
-        raise
-
-
-def _uploaded_source(upload_root: Path, top_level: str | None) -> Path:
-    content = upload_root / "content"
-    if top_level:
-        candidate = content / top_level
-        if candidate.is_dir():
-            return candidate
-    return content
-
-
-def _cleanup_upload(path: Path | None) -> None:
-    if path is not None:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-
-def _new_pdf_cache(staging_root: Path, upload_root: Path | None = None) -> Path:
-    if upload_root is not None:
-        root = upload_root / "pdf-rendered" / str(uuid4())
-    else:
-        root = staging_root / "pdf-rendered" / str(uuid4())
-    root.mkdir(parents=True, exist_ok=False)
-    return root
 
 def _review_role_choices(item, *, is_series: bool) -> list[ReviewRole]:
     if item.source_kind == "subseries":
