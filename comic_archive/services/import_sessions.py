@@ -48,6 +48,8 @@ class ImportSession:
     workspace_cached_folder_media: dict[str, list[str]] = field(default_factory=dict)
     workspace_cached_media_index: dict[str, object] = field(default_factory=dict)
     workspace_cached_media_owner: dict[str, str] = field(default_factory=dict)
+    workspace_cached_automatic_media_owner: dict[str, str] = field(default_factory=dict)
+    workspace_seed_folder_media: dict[str, list[object]] = field(default_factory=dict)
     workspace_cache_builds: int = 0
     workspace_ownership_dirty: bool = False
 

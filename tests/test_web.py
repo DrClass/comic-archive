@@ -3359,3 +3359,50 @@ def test_workspace_ownership_resolves_by_node_not_media_times_nodes(tmp_path: Pa
     # behavior that made very large comics stall).
     assert calls <= len(tree)
     assert len(session.workspace_cached_media_owner) == 1000
+
+
+def test_workspace_origin_lookup_uses_cached_automatic_owner(tmp_path: Path, monkeypatch):
+    from comic_archive.web import ImportSession, _workspace_origin_for_media, _workspace_tree
+    import comic_archive.services.workspace as workspace_module
+
+    source = tmp_path / "Origin Cache Comic"
+    for issue_index in range(12):
+        issue = source / f"Issue {issue_index + 1:02d}"
+        issue.mkdir(parents=True, exist_ok=True)
+        for page_index in range(20):
+            (issue / f"{page_index + 1:03d}.jpg").write_bytes(b"page")
+
+    session = ImportSession(plan=build_review_plan(scan_folder(source)))
+    _workspace_tree(session)
+    media_path = next(iter(session.workspace_cached_media_index))
+    expected = session.workspace_cached_automatic_media_owner[media_path]
+
+    def fail_legacy(*_args, **_kwargs):
+        raise AssertionError("origin lookup must use the cached automatic-owner index")
+
+    monkeypatch.setattr(workspace_module, "_workspace_origin_for_media_in_tree", fail_legacy)
+    assert _workspace_origin_for_media(session, media_path) == expected
+
+
+def test_workspace_seed_media_index_survives_ownership_cache_rebuild(tmp_path: Path):
+    from comic_archive.web import ImportSession, _workspace_invalidate_cache, _workspace_tree
+
+    source = tmp_path / "Seed Index Comic"
+    for issue_index in range(25):
+        issue = source / f"Issue {issue_index + 1:02d}"
+        issue.mkdir(parents=True, exist_ok=True)
+        for page_index in range(8):
+            (issue / f"{page_index + 1:03d}.jpg").write_bytes(b"page")
+
+    session = ImportSession(plan=build_review_plan(scan_folder(source)))
+    _workspace_tree(session)
+    seed_index = session.workspace_seed_folder_media
+    assert seed_index
+
+    _workspace_invalidate_cache(session)
+    _workspace_tree(session)
+
+    # Scanner-derived folder membership is immutable for an import session and
+    # should not be reconstructed on every ownership-affecting workspace edit.
+    assert session.workspace_seed_folder_media is seed_index
+    assert len(session.workspace_cached_media_owner) == 200

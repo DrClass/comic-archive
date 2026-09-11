@@ -302,7 +302,10 @@ def register_import_workspace_routes(app: FastAPI, deps: ImportWorkspaceRouteDep
         item = next((media for media in _workspace_all_media(session) if str(media.path) == source_path), None)
         if item is None:
             raise HTTPException(status_code=400, detail="Unknown page")
-        allowed = {value for node in _workspace_tree(session) for value, _ in _workspace_media_targets_for_folder(session, str(node["path"]))}
+        allowed = {
+            str(node["path"]) for node in _workspace_tree(session)
+            if str(node["role"]) in {"Issue", "Primary Pages", "Issue-Extras", "Series-Extras"}
+        }
         if target not in allowed:
             raise HTTPException(status_code=400, detail="Invalid target group")
         origin = _workspace_origin_for_media(session, source_path)

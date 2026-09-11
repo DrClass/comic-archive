@@ -295,6 +295,7 @@ def _workspace_invalidate_cache(session: ImportSession) -> None:
     session.workspace_cached_folder_media.clear()
     session.workspace_cached_media_index.clear()
     session.workspace_cached_media_owner.clear()
+    session.workspace_cached_automatic_media_owner.clear()
     session.workspace_ownership_dirty = False
 
 
@@ -337,14 +338,14 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
             if previous is None or candidate > previous:
                 automatic_candidates[media_path] = candidate
 
+    automatic_owner_by_media = {media_path: candidate[2] for media_path, candidate in automatic_candidates.items()}
     for item in media_items:
         media_path = str(item.path)
         if media_path in session.workspace_ignored_media:
             continue
         owner = session.workspace_media_targets.get(media_path)
         if owner is None:
-            candidate = automatic_candidates.get(media_path)
-            owner = candidate[2] if candidate is not None else None
+            owner = automatic_owner_by_media.get(media_path)
         if owner in by_folder:
             by_folder[owner].append(media_path)
             owner_by_media[media_path] = owner
@@ -358,6 +359,7 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
     session.workspace_cached_folder_media = by_folder
     session.workspace_cached_media_index = media_index
     session.workspace_cached_media_owner = owner_by_media
+    session.workspace_cached_automatic_media_owner = automatic_owner_by_media
     session.workspace_ownership_dirty = False
     session.workspace_cache_signature = signature
     session.workspace_cache_builds += 1
@@ -481,7 +483,12 @@ def _workspace_origin_for_media_in_tree(session: ImportSession, media_path: str,
 
 
 def _workspace_origin_for_media(session: ImportSession, media_path: str) -> str | None:
-    return _workspace_origin_for_media_in_tree(session, media_path, _workspace_tree(session, include_virtual=False))
+    # Automatic ownership is computed during the authoritative cache build and
+    # retained separately from explicit user targets. Page moves can therefore
+    # compare against the scanner-derived origin in O(1) instead of rescanning
+    # every semantic node for every selected page.
+    _workspace_ensure_authoritative_cache(session)
+    return session.workspace_cached_automatic_media_owner.get(media_path)
 
 
 def _workspace_media_targets_for_folder(session: ImportSession, folder_key: str) -> list[tuple[str, str]]:
@@ -501,52 +508,64 @@ def _workspace_media_targets_for_folder(session: ImportSession, folder_key: str)
     return choices
 
 
-def _workspace_media_for_folder_base(session: ImportSession, folder_key: str) -> list[object]:
+def _workspace_seed_media_index(session: ImportSession) -> dict[str, list[object]]:
+    """Index scanner-seeded media by workspace folder once per import session.
+
+    The scan model is immutable for the lifetime of an import session. Building
+    this index once avoids repeatedly walking every scanned issue/group whenever
+    workspace ownership is rebuilt after an edit.
+    """
+    if session.workspace_seed_folder_media:
+        return session.workspace_seed_folder_media
+
     scan = session.plan.scan
-    content_rel = _workspace_content_relative(scan, folder_key)
-    if content_rel is None:
-        return []
-    role_map = _workspace_role_map(session.plan)
-    role_item = role_map.get(folder_key)
-    item = role_item[1] if role_item else None
+    result: dict[str, list[object]] = {}
 
-    if item is not None:
-        if getattr(item, "source_kind", None) == "issue":
-            issue = next((issue for issue in scan.issues if issue.relative_path == item.relative_path), None)
-            return list(issue.primary.media) if issue and issue.primary else []
-        if getattr(item, "source_kind", None) == "group":
-            for issue in scan.issues:
-                if issue.primary and issue.primary.relative_path == item.relative_path:
-                    return list(issue.primary.media)
-                for group in issue.extras:
-                    if group.relative_path == item.relative_path:
-                        return list(group.media)
-            for group in scan.extras:
-                if group.relative_path == item.relative_path:
-                    return list(group.media)
-        if getattr(item, "source_kind", None) == "subseries":
-            return []
+    def add(key: str, media: object) -> None:
+        bucket = result.setdefault(key.replace("\\", "/"), [])
+        bucket.append(media)
 
-    # Flattened page containers do not have their own ReviewItem yet. Select
-    # only the primary media whose virtual relative path sits below this folder.
-    media_items = []
-    if scan.is_series_candidate:
-        for issue in scan.issues:
-            if not issue.primary:
+    def index_primary(issue_relative: Path | None, media_items: list[object]) -> None:
+        # Primary media can seed flattened page-container folders. Index the
+        # issue/root folder and each media-bearing ancestor represented by the
+        # media's virtual relative path.
+        base = issue_relative or Path(".")
+        base_key = _review_source_relative(scan, base).replace("\\", "/") if base != Path(".") else _workspace_source_relative(scan, scan.content_root)
+        for media in media_items:
+            add(base_key, media)
+            rel_parent = media.relative_path.parent
+            if rel_parent == Path("."):
                 continue
-            issue_key = issue.relative_path
-            try:
-                suffix = content_rel.relative_to(issue_key)
-            except ValueError:
-                continue
-            for media in issue.primary.media:
-                if suffix == Path(".") or suffix in media.relative_path.parents or media.relative_path.parent == suffix:
-                    media_items.append(media)
-    elif scan.primary:
-        for media in scan.primary.media:
-            if content_rel == Path(".") or content_rel in media.relative_path.parents or media.relative_path.parent == content_rel:
-                media_items.append(media)
-    return media_items
+            current = rel_parent
+            ancestors: list[Path] = []
+            while current != Path("."):
+                ancestors.append(current)
+                current = current.parent
+            for folder_rel in reversed(ancestors):
+                combined = (base / folder_rel) if base != Path(".") else folder_rel
+                add(_review_source_relative(scan, combined).replace("\\", "/"), media)
+
+    if scan.primary:
+        index_primary(None, list(scan.primary.media))
+    for issue in scan.issues:
+        if issue.primary:
+            index_primary(issue.relative_path, list(issue.primary.media))
+        for group in issue.extras:
+            key = _review_source_relative(scan, group.relative_path).replace("\\", "/")
+            result[key] = list(group.media)
+    for group in scan.extras:
+        key = _review_source_relative(scan, group.relative_path).replace("\\", "/")
+        result[key] = list(group.media)
+
+    session.workspace_seed_folder_media = result
+    return result
+
+
+def _workspace_media_for_folder_base(session: ImportSession, folder_key: str) -> list[object]:
+    # All scanner-derived folder membership is immutable. Use the one-time
+    # index rather than linearly searching scan.issues/scan.extras for every
+    # semantic node during each ownership-cache rebuild.
+    return list(_workspace_seed_media_index(session).get(folder_key.replace("\\", "/"), ()))
 
 
 
@@ -631,27 +650,38 @@ def _workspace_build_staged_import(
     root_path = str(tree[0]["path"])
     report("workspace", len(tree), len(tree), f"Prepared {len(tree):,} workspace folders")
 
-    def ancestors(path: str):
-        current = str(nodes.get(path, {}).get("parent") or "")
-        seen: set[str] = set()
-        while current and current in nodes and current not in seen:
-            seen.add(current)
-            yield nodes[current]
-            current = str(nodes[current].get("parent") or "")
+    # Precompute semantic ancestry in one tree pass. Validation previously
+    # re-walked parent chains for nearly every node and then repeated those
+    # walks while building groups. On deeply nested/large workspaces that made
+    # staged-model construction grow unnecessarily with hierarchy depth.
+    nearest_series_parent: dict[str, str | None] = {}
+    nearest_issue_parent: dict[str, str | None] = {}
+    ignored_paths: set[str] = set()
+    for node in tree:
+        path = str(node["path"])
+        parent_path = str(node.get("parent") or "")
+        parent = nodes.get(parent_path)
+        parent_role = str(parent["role"]) if parent is not None else ""
+        nearest_series_parent[path] = (
+            parent_path if parent_role in {"Series", "Sub-Series"}
+            else nearest_series_parent.get(parent_path)
+        )
+        nearest_issue_parent[path] = (
+            parent_path if parent_role == "Issue"
+            else nearest_issue_parent.get(parent_path)
+        )
+        if str(node["role"]) == "Ignore" or parent_path in ignored_paths:
+            ignored_paths.add(path)
 
     def ignored_node(path: str) -> bool:
-        node = nodes.get(path)
-        if node is None:
-            return False
-        if str(node["role"]) == "Ignore":
-            return True
-        return any(str(parent["role"]) == "Ignore" for parent in ancestors(path))
+        return path in ignored_paths
 
     root_series_candidates = []
     for node in tree:
-        if str(node["role"]) != "Series" or ignored_node(str(node["path"])):
+        path = str(node["path"])
+        if str(node["role"]) != "Series" or ignored_node(path):
             continue
-        if not any(str(parent["role"]) in {"Series", "Sub-Series"} for parent in ancestors(str(node["path"]))):
+        if nearest_series_parent.get(path) is None:
             root_series_candidates.append(node)
     if not root_series_candidates and str(nodes[root_path]["role"]) in {"Issue", "Primary Pages"}:
         # Backward-compatible one-shot: the upload root doubles as the logical
@@ -688,22 +718,15 @@ def _workspace_build_staged_import(
         issues=[], subseries=[], series_extras=[],
     )
 
-    def nearest(path: str, roles: set[str]) -> dict[str, object] | None:
-        node = nodes.get(path)
-        if node and str(node["role"]) in roles:
-            return node
-        return next((parent for parent in ancestors(path) if str(parent["role"]) in roles), None)
-
     series_key_by_path = {logical_root_path: "."}
     sibling_counter: dict[str, int] = {}
     for node in tree:
         path = str(node["path"])
         if path == logical_root_path or ignored_node(path) or str(node["role"]) != "Sub-Series":
             continue
-        parent_series = next((parent for parent in ancestors(path) if str(parent["role"]) in {"Series", "Sub-Series"}), None)
-        if parent_series is None:
+        parent_path = nearest_series_parent.get(path)
+        if parent_path is None:
             raise StagingError(f"Sub-series {node['name']} is not inside a Series")
-        parent_path = str(parent_series["path"])
         if parent_path not in series_key_by_path:
             # Tree traversal should normally ensure the parent has already been seen.
             raise StagingError(f"Sub-series {node['name']} has an invalid parent hierarchy")
@@ -727,13 +750,12 @@ def _workspace_build_staged_import(
         path = str(node["path"])
         if ignored_node(path) or str(node["role"]) != "Issue":
             continue
-        parent_series = next((parent for parent in ancestors(path) if str(parent["role"]) in {"Series", "Sub-Series"}), None)
-        if parent_series is None and (path == logical_root_path or any(str(parent["path"]) == logical_root_path for parent in ancestors(path))):
+        parent_path = nearest_series_parent.get(path)
+        if parent_path is None and (path == logical_root_path or logical_root_path == root_path):
             series_key = "."
-        elif parent_series is None:
+        elif parent_path is None:
             raise StagingError(f"Issue {node['name']} must be inside a Series or Sub-Series")
         else:
-            parent_path = str(parent_series["path"])
             series_key = series_key_by_path.get(parent_path)
         if series_key is None:
             raise StagingError(f"Issue {node['name']} references an invalid series hierarchy")
@@ -756,7 +778,7 @@ def _workspace_build_staged_import(
     # synthesizing one issue when the logical root itself still has primary media
     # and there are no explicit issue nodes.
     if not staged.issues:
-        root_media = [m for m in _workspace_all_media(session) if str(m.path) not in session.workspace_ignored_media]
+        root_media = [m for m in session.workspace_cached_media_index.values() if str(m.path) not in session.workspace_ignored_media]
         if root_media and logical_root_path == root_path:
             issue = StagedIssue(
                 source_key=".", issue_number=None, title=None, complete=None,
@@ -774,7 +796,7 @@ def _workspace_build_staged_import(
 
     # Accumulate media by semantic virtual folder.
     report("ownership", 0, 0, "Resolving media ownership")
-    all_media = _workspace_all_media(session)
+    all_media = list(session.workspace_cached_media_index.values())
     buckets: dict[str, list[object]] = {}
     unassigned: list[str] = []
     total_media = len(all_media)
@@ -815,24 +837,23 @@ def _workspace_build_staged_import(
         node = nodes[target]
         role = str(node["role"])
         if role in {"Issue", "Primary Pages"}:
-            issue_node = nearest(target, {"Issue"})
-            if issue_node is None and target == logical_root_path and logical_root_path in issue_by_path:
-                issue_path = logical_root_path
-            elif issue_node is None:
-                raise StagingError(f"Primary pages folder {node['name']} is not inside an Issue")
+            if role == "Issue":
+                issue_path = target
             else:
-                issue_path = str(issue_node["path"])
+                issue_path = nearest_issue_parent.get(target)
+            if issue_path is None and target == logical_root_path and logical_root_path in issue_by_path:
+                issue_path = logical_root_path
+            elif issue_path is None:
+                raise StagingError(f"Primary pages folder {node['name']} is not inside an Issue")
             if issue_path not in issue_by_path:
                 raise StagingError(f"Primary pages folder {node['name']} references an invalid Issue")
             primary_by_issue.setdefault(issue_path, []).extend(media_items)
         elif role == "Issue-Extras":
-            issue_node = next((parent for parent in ancestors(target) if str(parent["role"]) == "Issue"), None)
-            if issue_node is None:
+            if nearest_issue_parent.get(target) is None:
                 raise StagingError(f"Issue extras folder {node['name']} must be inside an Issue")
             extra_specs.append((node, media_items))
         elif role == "Series-Extras":
-            series_node = next((parent for parent in ancestors(target) if str(parent["role"]) in {"Series", "Sub-Series"}), None)
-            if series_node is None:
+            if nearest_series_parent.get(target) is None:
                 raise StagingError(f"Series extras folder {node['name']} must be inside a Series")
             series_extra_specs.append((node, media_items))
 
@@ -850,8 +871,10 @@ def _workspace_build_staged_import(
 
     for node, media_items in extra_specs:
         path = str(node["path"])
-        issue_node = next(parent for parent in ancestors(path) if str(parent["role"]) == "Issue")
-        issue = issue_by_path[str(issue_node["path"])]
+        issue_path = nearest_issue_parent[path]
+        if issue_path is None:
+            raise StagingError(f"Issue extras folder {node['name']} must be inside an Issue")
+        issue = issue_by_path[issue_path]
         if not media_items:
             raise StagingError(f"Empty content group: {node['name']}")
         meta = _workspace_node_metadata(session, node)
@@ -864,8 +887,9 @@ def _workspace_build_staged_import(
 
     for node, media_items in series_extra_specs:
         path = str(node["path"])
-        series_node = next(parent for parent in ancestors(path) if str(parent["role"]) in {"Series", "Sub-Series"})
-        owner_path = str(series_node["path"])
+        owner_path = nearest_series_parent[path]
+        if owner_path is None:
+            raise StagingError(f"Series extras folder {node['name']} must be inside a Series")
         owner_key = series_key_by_path.get(owner_path)
         if owner_key is None:
             raise StagingError(f"Series extras folder {node['name']} references an invalid Series")
