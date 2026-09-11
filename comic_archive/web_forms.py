@@ -22,3 +22,11 @@ def check_csrf_value(request: Request, supplied: str) -> None:
     expected = request.session.get("csrf_token", "")
     if not expected or not supplied or not secrets.compare_digest(expected, supplied):
         raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
+
+
+def bool_form(value: str) -> bool | None:
+    if value == "yes":
+        return True
+    if value == "no":
+        return False
+    return None
