@@ -47,6 +47,27 @@ from .library_views import (
     series_lineage as _series_lineage,
 )
 from .web_forms import form_data as _form_data, check_csrf_value as _check_csrf_value, bool_form as _bool_form
+from .services.import_sessions import (
+    ImportSession, BulkArtistSession,
+    atomic_json_write as _atomic_json_write,
+    session_state_path as _session_state_path,
+    persist_import_session as _persist_import_session,
+    restore_import_session as _restore_import_session,
+    delete_import_session_state as _delete_import_session_state,
+    save_completed_import as _save_completed_import,
+    load_completed_import as _load_completed_import,
+    persist_bulk_session as _persist_bulk_session,
+    restore_bulk_session as _restore_bulk_session,
+    delete_bulk_session_state as _delete_bulk_session_state,
+    rescan_import_session as _rescan_import_session,
+    touch_import_activity as _touch_import_activity,
+    touch_bulk_activity as _touch_bulk_activity,
+    touch_upload_root as _touch_upload_root,
+    remove_staging_record as _remove_staging_record_service,
+    cleanup_stale_imports as _cleanup_stale_imports_service,
+    session_or_404 as _session_or_404_service,
+    bulk_session_or_404 as _bulk_session_or_404_service,
+)
 
 
 _TEMPLATE_DIR = Path(__file__).with_name("templates")
@@ -152,56 +173,6 @@ class BrowserUploadSession:
     uploaded_bytes: int = 0
     started_at: float = field(default_factory=time.monotonic)
 
-
-@dataclass
-class ImportSession:
-    plan: ReviewPlan
-    staged: StagedImport | None = None
-    staging_path: Path | None = None
-    author_default: str | None = None
-    series_default: str | None = None
-    bulk_id: str | None = None
-    upload_root: Path | None = None
-    pdf_cache_root: Path | None = None
-    last_activity: float = field(default_factory=time.time)
-    extra_folder_overrides: set[str] = field(default_factory=set)
-    subseries_folder_overrides: set[str] = field(default_factory=set)
-    primary_folder_overrides: set[str] = field(default_factory=set)
-    container_folder_overrides: set[str] = field(default_factory=set)
-    folder_order_overrides: dict[str, list[str]] = field(default_factory=dict)
-    workspace_author: str | None = None
-    workspace_series: str | None = None
-    workspace_series_complete: str = ""
-    workspace_metadata: dict[str, dict[str, str]] = field(default_factory=dict)
-    workspace_virtual_groups: dict[str, dict[str, str]] = field(default_factory=dict)
-    workspace_virtual_nodes: dict[str, dict[str, str]] = field(default_factory=dict)
-    workspace_media_targets: dict[str, str] = field(default_factory=dict)
-    workspace_role_overrides: dict[str, str] = field(default_factory=dict)
-    workspace_parent_overrides: dict[str, str] = field(default_factory=dict)
-    workspace_ignored_media: set[str] = field(default_factory=set)
-    # Runtime virtual-workspace cache. The filesystem/scanner seeds this once;
-    # normal workspace reads operate from these indexes until an edit changes
-    # the lightweight workspace signature.
-    workspace_cache_signature: str | None = None
-    workspace_cached_tree: list[dict[str, object]] | None = None
-    workspace_cached_folder_media: dict[str, list[str]] = field(default_factory=dict)
-    workspace_cached_media_index: dict[str, object] = field(default_factory=dict)
-    workspace_cached_media_owner: dict[str, str] = field(default_factory=dict)
-    workspace_cache_builds: int = 0
-    workspace_ownership_dirty: bool = False
-
-
-@dataclass
-class BulkArtistSession:
-    source: Path
-    author: str
-    candidates: list[BulkComicCandidate]
-    selected: list[int] = field(default_factory=list)
-    current_position: int = 0
-    imported_series: list[tuple[str, str]] = field(default_factory=list)
-    skipped_series: list[str] = field(default_factory=list)
-    upload_root: Path | None = None
-    last_activity: float = field(default_factory=time.time)
 
 
 def _safe_upload_relative(filename: str) -> Path:
@@ -1313,159 +1284,6 @@ def _workspace_build_staged_import(
     return staged
 
 
-def _session_state_dir(app: FastAPI) -> Path:
-    root = app.state.staging_root / "session_state"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _session_state_path(app: FastAPI, kind: str, session_id: str) -> Path:
-    return _session_state_dir(app) / f"{kind}_{session_id}.json"
-
-
-def _atomic_json_write(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temp.replace(path)
-
-
-def _staged_from_dict(data: dict) -> StagedImport:
-    def media(d: dict) -> StagedMedia:
-        return StagedMedia(**d)
-    def group(d: dict) -> StagedGroup:
-        return StagedGroup(
-            name=d["name"], relative_path=d["relative_path"], role=d["role"],
-            owner_type=d["owner_type"], owner_key=d.get("owner_key"),
-            media=[media(item) for item in d.get("media", [])],
-        )
-    return StagedImport(
-        schema_version=data["schema_version"], staging_id=data["staging_id"],
-        created_at=data["created_at"], source_path=data["source_path"],
-        content_root=data["content_root"], author=data["author"], series=data["series"],
-        import_kind=data["import_kind"], series_complete=data.get("series_complete"),
-        issues=[StagedIssue(
-            source_key=item["source_key"], issue_number=item.get("issue_number"),
-            title=item.get("title"), complete=item.get("complete"),
-            sort_order=item.get("sort_order"), series_key=item.get("series_key", "."),
-            groups=[group(g) for g in item.get("groups", [])],
-        ) for item in data.get("issues", [])],
-        subseries=[StagedSeries(**item) for item in data.get("subseries", [])],
-        series_extras=[group(g) for g in data.get("series_extras", [])],
-    )
-
-
-def _persist_import_session(app: FastAPI, session_id: str, session: ImportSession) -> None:
-    payload = {
-        "version": 1,
-        "last_activity": session.last_activity,
-        "source": str(session.plan.scan.source),
-        "author_default": session.author_default,
-        "series_default": session.series_default,
-        "bulk_id": session.bulk_id,
-        "upload_root": str(session.upload_root) if session.upload_root else None,
-        "pdf_cache_root": str(session.pdf_cache_root) if session.pdf_cache_root else None,
-        "staging_path": str(session.staging_path) if session.staging_path else None,
-        "staged": session.staged.to_dict() if session.staged else None,
-        "extra_folder_overrides": sorted(session.extra_folder_overrides),
-        "subseries_folder_overrides": sorted(session.subseries_folder_overrides),
-        "primary_folder_overrides": sorted(session.primary_folder_overrides),
-        "container_folder_overrides": sorted(session.container_folder_overrides),
-        "folder_order_overrides": session.folder_order_overrides,
-        "workspace_author": session.workspace_author,
-        "workspace_series": session.workspace_series,
-        "workspace_series_complete": session.workspace_series_complete,
-        "workspace_metadata": session.workspace_metadata,
-        "workspace_virtual_groups": session.workspace_virtual_groups,
-        "workspace_virtual_nodes": session.workspace_virtual_nodes,
-        "workspace_media_targets": session.workspace_media_targets,
-        "workspace_role_overrides": session.workspace_role_overrides,
-        "workspace_parent_overrides": session.workspace_parent_overrides,
-        "workspace_ignored_media": sorted(session.workspace_ignored_media),
-    }
-    _atomic_json_write(_session_state_path(app, "import", session_id), payload)
-
-
-def _restore_import_session(app: FastAPI, session_id: str) -> ImportSession | None:
-    path = _session_state_path(app, "import", session_id)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        last_activity = float(data.get("last_activity", 0))
-        if time.time() - last_activity >= UPLOAD_INACTIVITY_SECONDS:
-            return None
-        source = Path(data["source"])
-        if not source.exists():
-            return None
-        pdf_cache = Path(data["pdf_cache_root"]) if data.get("pdf_cache_root") else None
-        scan = scan_folder(
-            source,
-            extra_folders=data.get("extra_folder_overrides", []),
-            primary_folders=data.get("primary_folder_overrides", []),
-            subseries_folders=data.get("subseries_folder_overrides", []),
-            pdf_cache_root=pdf_cache,
-        )
-        session = ImportSession(
-            plan=build_review_plan(scan),
-            staged=_staged_from_dict(data["staged"]) if data.get("staged") else None,
-            staging_path=Path(data["staging_path"]) if data.get("staging_path") else None,
-            author_default=data.get("author_default"), series_default=data.get("series_default"),
-            bulk_id=data.get("bulk_id"),
-            upload_root=Path(data["upload_root"]) if data.get("upload_root") else None,
-            pdf_cache_root=pdf_cache, last_activity=last_activity,
-            extra_folder_overrides=set(data.get("extra_folder_overrides", [])),
-            subseries_folder_overrides=set(data.get("subseries_folder_overrides", [])),
-            primary_folder_overrides=set(data.get("primary_folder_overrides", [])),
-            container_folder_overrides=set(data.get("container_folder_overrides", [])),
-            folder_order_overrides={k: list(v) for k, v in data.get("folder_order_overrides", {}).items()},
-            workspace_author=data.get("workspace_author"), workspace_series=data.get("workspace_series"),
-            workspace_series_complete=data.get("workspace_series_complete", ""),
-            workspace_metadata=data.get("workspace_metadata", {}),
-            workspace_virtual_groups=data.get("workspace_virtual_groups", {}),
-            workspace_virtual_nodes=data.get("workspace_virtual_nodes", {}),
-            workspace_media_targets=data.get("workspace_media_targets", {}),
-            workspace_role_overrides=data.get("workspace_role_overrides", {}),
-            workspace_parent_overrides=data.get("workspace_parent_overrides", {}),
-            workspace_ignored_media=set(data.get("workspace_ignored_media", [])),
-        )
-        app.state.import_sessions[session_id] = session
-        return session
-    except (OSError, ValueError, KeyError, TypeError, FolderScanError, json.JSONDecodeError):
-        return None
-
-
-def _delete_import_session_state(app: FastAPI, session_id: str) -> None:
-    try:
-        _session_state_path(app, "import", session_id).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _completed_import_path(app: FastAPI, session_id: str) -> Path:
-    return _session_state_path(app, "completed", session_id)
-
-
-def _save_completed_import(app: FastAPI, session_id: str, payload: dict) -> None:
-    data = dict(payload)
-    data["last_activity"] = time.time()
-    _atomic_json_write(_completed_import_path(app, session_id), data)
-
-
-def _load_completed_import(app: FastAPI, session_id: str) -> dict | None:
-    path = _completed_import_path(app, session_id)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if time.time() - float(data.get("last_activity", 0)) >= UPLOAD_INACTIVITY_SECONDS:
-            path.unlink(missing_ok=True)
-            return None
-        return data
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
-
-
 def _existing_commit_result(database: Path, staged: StagedImport) -> dict | None:
     try:
         with sqlite3.connect(database) as db:
@@ -1486,215 +1304,25 @@ def _existing_commit_result(database: Path, staged: StagedImport) -> dict | None
         return None
 
 
-def _persist_bulk_session(app: FastAPI, bulk_id: str, bulk: BulkArtistSession) -> None:
-    _atomic_json_write(_session_state_path(app, "bulk", bulk_id), {
-        "version": 1, "source": str(bulk.source), "author": bulk.author,
-        "candidates": [{"path": str(c.path), "name": c.name, "media_count": c.media_count} for c in bulk.candidates],
-        "selected": bulk.selected, "current_position": bulk.current_position,
-        "imported_series": bulk.imported_series, "skipped_series": bulk.skipped_series,
-        "upload_root": str(bulk.upload_root) if bulk.upload_root else None,
-        "last_activity": bulk.last_activity,
-    })
-
-
-def _restore_bulk_session(app: FastAPI, bulk_id: str) -> BulkArtistSession | None:
-    path = _session_state_path(app, "bulk", bulk_id)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        last_activity = float(data.get("last_activity", 0))
-        if time.time() - last_activity >= UPLOAD_INACTIVITY_SECONDS:
-            return None
-        bulk = BulkArtistSession(
-            source=Path(data["source"]), author=data["author"],
-            candidates=[BulkComicCandidate(Path(c["path"]), c["name"], int(c["media_count"])) for c in data.get("candidates", [])],
-            selected=[int(v) for v in data.get("selected", [])], current_position=int(data.get("current_position", 0)),
-            imported_series=[tuple(v) for v in data.get("imported_series", [])],
-            skipped_series=list(data.get("skipped_series", [])),
-            upload_root=Path(data["upload_root"]) if data.get("upload_root") else None,
-            last_activity=last_activity,
-        )
-        app.state.bulk_import_sessions[bulk_id] = bulk
-        return bulk
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return None
-
-
-def _delete_bulk_session_state(app: FastAPI, bulk_id: str) -> None:
-    try:
-        _session_state_path(app, "bulk", bulk_id).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _touch_upload_root(path: Path | None, now: float | None = None) -> None:
-    if path is None or not path.exists():
-        return
-    stamp = time.time() if now is None else now
-    try:
-        import os
-        os.utime(path, (stamp, stamp))
-    except OSError:
-        pass
-
-
-def _rescan_import_session(session: ImportSession) -> None:
-    scan = scan_folder(
-        session.plan.scan.source,
-        extra_folders=sorted(session.extra_folder_overrides),
-        primary_folders=sorted(session.primary_folder_overrides),
-        subseries_folders=sorted(session.subseries_folder_overrides),
-        pdf_cache_root=session.pdf_cache_root,
-    )
-    session.plan = build_review_plan(scan)
-
-
-def _touch_import_activity(app: FastAPI, session: ImportSession) -> None:
-    now = time.time()
-    session.last_activity = now
-    _touch_upload_root(session.upload_root, now)
-    session_id = next((key for key, value in app.state.import_sessions.items() if value is session), None)
-    if session_id:
-        _persist_import_session(app, session_id, session)
-    if session.bulk_id:
-        bulk = app.state.bulk_import_sessions.get(session.bulk_id)
-        if bulk is not None:
-            bulk.last_activity = now
-            _touch_upload_root(bulk.upload_root, now)
-            _persist_bulk_session(app, session.bulk_id, bulk)
-
-
-def _touch_bulk_activity(app: FastAPI, bulk: BulkArtistSession) -> None:
-    now = time.time()
-    bulk.last_activity = now
-    _touch_upload_root(bulk.upload_root, now)
-    bulk_id = next((key for key, value in app.state.bulk_import_sessions.items() if value is bulk), None)
-    if bulk_id:
-        _persist_bulk_session(app, bulk_id, bulk)
-
 
 def _remove_staging_record(session: ImportSession) -> None:
-    _cleanup_upload(session.pdf_cache_root)
-    session.pdf_cache_root = None
-    if session.staging_path is not None:
-        try:
-            session.staging_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    _remove_staging_record_service(session, _cleanup_upload)
 
 
 def _cleanup_stale_imports(app: FastAPI, staging_root: Path, *, now: float | None = None) -> None:
-    current = time.time() if now is None else now
-    cutoff = current - UPLOAD_INACTIVITY_SECONDS
-
-    stale_upload_ids = [
-        upload_id for upload_id, upload in app.state.upload_sessions.items()
-        if upload.last_activity < cutoff
-    ]
-    upload_roots_to_delete: set[Path] = set()
-    for upload_id in stale_upload_ids:
-        upload = app.state.upload_sessions.pop(upload_id, None)
-        _delete_browser_upload_session_state(app, upload_id)
-        if upload is not None:
-            upload_roots_to_delete.add(upload.upload_root)
-
-    stale_bulk_ids = [
-        bulk_id for bulk_id, bulk in app.state.bulk_import_sessions.items()
-        if bulk.last_activity < cutoff
-    ]
-    for bulk_id in stale_bulk_ids:
-        bulk = app.state.bulk_import_sessions.pop(bulk_id, None)
-        _delete_bulk_session_state(app, bulk_id)
-        if bulk and bulk.upload_root:
-            upload_roots_to_delete.add(bulk.upload_root)
-
-    for session_id, session in list(app.state.import_sessions.items()):
-        bulk_is_stale = session.bulk_id in stale_bulk_ids
-        if session.last_activity < cutoff or bulk_is_stale:
-            app.state.import_sessions.pop(session_id, None)
-            _delete_import_session_state(app, session_id)
-            _remove_staging_record(session)
-            if session.upload_root and (session.bulk_id is None or bulk_is_stale):
-                upload_roots_to_delete.add(session.upload_root)
-
-    for root in upload_roots_to_delete:
-        _cleanup_upload(root)
-
-    uploads_root = staging_root / "uploads"
-    if uploads_root.is_dir():
-        active_roots = {
-            item.upload_root.resolve()
-            for item in (
-                list(app.state.upload_sessions.values())
-                + list(app.state.import_sessions.values())
-                + list(app.state.bulk_import_sessions.values())
-            )
-            if item.upload_root is not None and item.upload_root.exists()
-        }
-        for child in uploads_root.iterdir():
-            if not child.is_dir():
-                continue
-            try:
-                if child.resolve() in active_roots:
-                    continue
-                if child.stat().st_mtime < cutoff:
-                    _cleanup_upload(child)
-            except OSError:
-                continue
-
-    state_root = staging_root / "session_state"
-    if state_root.is_dir():
-        for state_file in state_root.glob("*.json"):
-            try:
-                data = json.loads(state_file.read_text(encoding="utf-8"))
-                if float(data.get("last_activity", 0)) < cutoff:
-                    state_file.unlink(missing_ok=True)
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                try:
-                    if state_file.stat().st_mtime < cutoff:
-                        state_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-    active_staging_paths = {
-        session.staging_path.resolve()
-        for session in app.state.import_sessions.values()
-        if session.staging_path is not None and session.staging_path.exists()
-    }
-    if staging_root.is_dir():
-        for child in staging_root.glob("*.json"):
-            try:
-                if child.resolve() in active_staging_paths:
-                    continue
-                if child.stat().st_mtime < cutoff:
-                    child.unlink(missing_ok=True)
-            except OSError:
-                continue
+    _cleanup_stale_imports_service(
+        app, staging_root, now=now,
+        delete_browser_upload_state=_delete_browser_upload_session_state,
+        cleanup_upload=_cleanup_upload,
+    )
 
 
 def _session_or_404(app: FastAPI, session_id: str) -> ImportSession:
-    session = app.state.import_sessions.get(session_id)
-    if session is None:
-        session = _restore_import_session(app, session_id)
-    if session is not None and time.time() - session.last_activity >= UPLOAD_INACTIVITY_SECONDS:
-        _cleanup_stale_imports(app, app.state.staging_root)
-        session = app.state.import_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Import session expired or was cleaned up after 12 hours of inactivity")
-    return session
+    return _session_or_404_service(app, session_id, cleanup_stale=_cleanup_stale_imports)
 
 
 def _bulk_session_or_404(app: FastAPI, bulk_id: str) -> BulkArtistSession:
-    session = app.state.bulk_import_sessions.get(bulk_id)
-    if session is None:
-        session = _restore_bulk_session(app, bulk_id)
-    if session is not None and time.time() - session.last_activity >= UPLOAD_INACTIVITY_SECONDS:
-        _cleanup_stale_imports(app, app.state.staging_root)
-        session = app.state.bulk_import_sessions.get(bulk_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Bulk import session expired or was cleaned up after 12 hours of inactivity")
-    return session
+    return _bulk_session_or_404_service(app, bulk_id, cleanup_stale=_cleanup_stale_imports)
 
 
 def _start_bulk_item(app: FastAPI, bulk_id: str) -> str | None:
