@@ -42,9 +42,21 @@ def create_thumbnail(
         with Image.open(source) as image:
             # For animated images, Pillow starts on frame 0. We intentionally
             # use only the first frame for the grid thumbnail.
-            if getattr(image, "is_animated", False):
+            animated = bool(getattr(image, "is_animated", False))
+            if animated:
                 image.seek(0)
-            image = ImageOps.exif_transpose(image)
+
+            # JPEG decoders can downsample while decoding. Comic pages are often
+            # multi-megapixel JPEGs, while our derivative is only 320x480.
+            # Asking Pillow for a decoder-level draft avoids materializing the
+            # full-resolution pixel buffer only to immediately shrink it.
+            # Other formats retain the existing decode path.
+            if not animated and image.format == "JPEG":
+                image.draft("RGB", THUMBNAIL_MAX_SIZE)
+
+            # Mutating in place avoids an additional full image copy before the
+            # final resize, which is especially helpful for large source pages.
+            ImageOps.exif_transpose(image, in_place=True)
             image.thumbnail(THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
 
             if image.mode in {"RGBA", "LA"} or (

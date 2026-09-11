@@ -37,3 +37,29 @@ def test_commit_generates_thumbnail_and_backfill_is_idempotent(tmp_path: Path):
     second = build_missing_thumbnails(db, library)
     assert second.created == 1
     assert thumb.is_file()
+
+
+def test_jpeg_thumbnail_uses_decoder_downsampling(tmp_path: Path, monkeypatch):
+    """Large JPEG pages should be downsampled by the decoder before resize."""
+    from PIL import JpegImagePlugin
+    from comic_archive.thumbnails import create_thumbnail
+
+    source = tmp_path / "page.jpg"
+    destination = tmp_path / "thumb.jpg"
+    Image.new("RGB", (2400, 3600), "white").save(source, "JPEG", quality=88)
+
+    calls: list[tuple[str | None, tuple[int, int]]] = []
+    original = JpegImagePlugin.JpegImageFile.draft
+
+    def tracking_draft(self, mode, size):
+        calls.append((mode, size))
+        return original(self, mode, size)
+
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", tracking_draft)
+
+    assert create_thumbnail(source, destination, mime_type="image/jpeg") is True
+    assert calls
+    assert calls[0] == ("RGB", (320, 480))
+    with Image.open(destination) as thumb:
+        assert thumb.width <= 320
+        assert thumb.height <= 480
