@@ -3117,7 +3117,7 @@ def test_workspace_drag_script_captures_path_before_async_move(tmp_path: Path):
 
 def test_workspace_virtual_cache_reused_between_folder_reads(tmp_path: Path, monkeypatch):
     from comic_archive.web import ImportSession, _workspace_media_for_folder, _workspace_tree
-    import comic_archive.web as web_module
+    import comic_archive.services.workspace as workspace_module
 
     source = tmp_path / "Comic"
     for path in ("Chapter 1/001.jpg", "Chapter 1/002.jpg", "Chapter 2/001.jpg"):
@@ -3131,16 +3131,16 @@ def test_workspace_virtual_cache_reused_between_folder_reads(tmp_path: Path, mon
     assert first_builds == 1
     chapter = next(str(node["path"]) for node in tree if node["name"] == "Chapter 1")
 
-    original = web_module._workspace_tree_uncached
+    original = workspace_module._workspace_tree_uncached
     def fail_if_rebuilt(*args, **kwargs):
         raise AssertionError("folder navigation rebuilt the filesystem-backed workspace")
-    monkeypatch.setattr(web_module, "_workspace_tree_uncached", fail_if_rebuilt)
+    monkeypatch.setattr(workspace_module, "_workspace_tree_uncached", fail_if_rebuilt)
 
     assert _workspace_tree(session) is tree
     assert len(_workspace_media_for_folder(session, chapter)) == 2
     assert _workspace_tree(session) is tree
     assert session.workspace_cache_builds == first_builds
-    monkeypatch.setattr(web_module, "_workspace_tree_uncached", original)
+    monkeypatch.setattr(workspace_module, "_workspace_tree_uncached", original)
 
 
 def test_workspace_virtual_cache_invalidates_after_logical_edit(tmp_path: Path):
