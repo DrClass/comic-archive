@@ -3305,3 +3305,57 @@ def test_normal_requests_do_not_reinitialize_database(tmp_path: Path, monkeypatc
     response = client.get("/")
     assert response.status_code == 200
     assert "Example Artist" in response.text
+
+
+def test_workspace_tree_reuses_scanned_media_paths_without_filesystem_rglob(tmp_path: Path, monkeypatch):
+    from comic_archive.web import ImportSession, _workspace_tree
+
+    source = tmp_path / "Comic"
+    for folder in ("Issue 1", "Issue 2", "Issue 3"):
+        target = source / folder
+        target.mkdir(parents=True, exist_ok=True)
+        for index in range(10):
+            (target / f"{index + 1:03d}.jpg").write_bytes(b"page")
+
+    # Scanning is allowed to touch the filesystem. Once the immutable scanned
+    # model exists, building the workspace tree must not recursively enumerate
+    # the source tree again.
+    session = ImportSession(plan=build_review_plan(scan_folder(source)))
+
+    def fail_rglob(*_args, **_kwargs):
+        raise AssertionError("workspace tree must derive folders from scanned media, not rglob the source")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+    tree = _workspace_tree(session)
+    assert len(tree) == 4
+    assert sum(int(node["direct_files"]) for node in tree) == 30
+
+
+def test_workspace_ownership_resolves_by_node_not_media_times_nodes(tmp_path: Path, monkeypatch):
+    from comic_archive.web import ImportSession, _workspace_tree
+    import comic_archive.services.workspace as workspace_module
+
+    source = tmp_path / "Large Comic"
+    for issue_index in range(20):
+        issue = source / f"Issue {issue_index + 1:02d}"
+        issue.mkdir(parents=True, exist_ok=True)
+        for page_index in range(50):
+            (issue / f"{page_index + 1:03d}.jpg").write_bytes(b"page")
+
+    session = ImportSession(plan=build_review_plan(scan_folder(source)))
+    calls = 0
+    original = workspace_module._workspace_media_for_folder_base
+
+    def counted(session_arg, folder_key):
+        nonlocal calls
+        calls += 1
+        return original(session_arg, folder_key)
+
+    monkeypatch.setattr(workspace_module, "_workspace_media_for_folder_base", counted)
+    tree = _workspace_tree(session)
+
+    # Ownership may inspect each semantic node once. It must not invoke the
+    # folder-media resolver once per media item per node (the former O(M*N)
+    # behavior that made very large comics stall).
+    assert calls <= len(tree)
+    assert len(session.workspace_cached_media_owner) == 1000

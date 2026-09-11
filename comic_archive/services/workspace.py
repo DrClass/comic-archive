@@ -114,15 +114,29 @@ def _workspace_tree_uncached(session: ImportSession, *, include_virtual: bool = 
     root_key = _workspace_source_relative(scan, root)
     nodes_by_key: dict[str, dict[str, object]] = {}
 
-    source_paths = [root]
-    try:
-        source_paths.extend(
-            path for path in root.rglob("*")
-            if path.is_dir() and _workspace_has_media(path)
-        )
-    except OSError:
-        pass
-    source_paths = sorted(set(source_paths), key=lambda path: (len(path.parts), natural_text_key(path.as_posix())))
+    # The scanner has already enumerated every supported media file. Derive the
+    # media-bearing directory tree from those paths instead of recursively
+    # walking the filesystem again from every directory. The previous approach
+    # called rglob() once for the root and then _workspace_has_media() (another
+    # recursive rglob) for each discovered directory, which becomes extremely
+    # expensive on large/deep comics.
+    media_items = _workspace_all_media(session)
+    source_paths_set: set[Path] = {root}
+    direct_media_counts: dict[Path, int] = {}
+    for media in media_items:
+        parent = media.path.parent
+        direct_media_counts[parent] = direct_media_counts.get(parent, 0) + 1
+        current = parent
+        while True:
+            try:
+                current.relative_to(root)
+            except ValueError:
+                break
+            source_paths_set.add(current)
+            if current == root:
+                break
+            current = current.parent
+    source_paths = sorted(source_paths_set, key=lambda path: (len(path.parts), natural_text_key(path.as_posix())))
     included_keys = {_workspace_source_relative(scan, path) for path in source_paths}
 
     def source_parent(path: Path) -> str | None:
@@ -146,7 +160,7 @@ def _workspace_tree_uncached(session: ImportSession, *, include_virtual: bool = 
         parent = session.workspace_parent_overrides.get(key, source_parent(path))
         nodes_by_key[key] = {
             "path": key, "name": path.name, "role": role,
-            "direct_files": _workspace_direct_media_count(path), "is_root": key == root_key,
+            "direct_files": direct_media_counts.get(path, 0), "is_root": key == root_key,
             "item": item, "parent": parent, "virtual": False, "synthetic": False,
         }
 
@@ -298,13 +312,39 @@ def _workspace_ensure_cache(session: ImportSession) -> None:
     media_index = {str(item.path): item for item in media_items}
     by_folder: dict[str, list[str]] = {str(node["path"]): [] for node in tree}
     owner_by_media: dict[str, str] = {}
+
+    # Resolve automatic ownership once per semantic node, not once per
+    # (media × node) pair. A media item may appear in several nested scanner
+    # groups, so retain the deepest/highest-ranked semantic owner exactly as
+    # the previous per-media search did.
+    role_rank = {
+        "Issue-Extras": 5, "Series-Extras": 5, "Primary Pages": 4,
+        "Issue": 3, "Sub-Series": 2, "Series": 1,
+    }
+    automatic_candidates: dict[str, tuple[int, int, str]] = {}
+    for node in tree:
+        if node.get("virtual") and not node.get("seeded"):
+            continue
+        if node["is_root"] and node["role"] not in {"Issue", "Primary Pages"}:
+            continue
+        role = str(node.get("role"))
+        if role not in role_rank:
+            continue
+        candidate = (int(node.get("depth", 0)), role_rank[role], str(node["path"]))
+        for media in _workspace_media_for_folder_base(session, str(node["path"])):
+            media_path = str(media.path)
+            previous = automatic_candidates.get(media_path)
+            if previous is None or candidate > previous:
+                automatic_candidates[media_path] = candidate
+
     for item in media_items:
         media_path = str(item.path)
         if media_path in session.workspace_ignored_media:
             continue
         owner = session.workspace_media_targets.get(media_path)
         if owner is None:
-            owner = _workspace_origin_for_media_in_tree(session, media_path, tree)
+            candidate = automatic_candidates.get(media_path)
+            owner = candidate[2] if candidate is not None else None
         if owner in by_folder:
             by_folder[owner].append(media_path)
             owner_by_media[media_path] = owner
