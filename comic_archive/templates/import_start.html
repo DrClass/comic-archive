@@ -224,7 +224,11 @@
             const scan = data.scan || {};
             if (scan.message) {
               let suffix = '';
-              if (scan.total > 0) suffix = ` (${scan.current} / ${scan.total})`;
+              if (scan.total > 0) {
+                suffix = ` (${scan.current} / ${scan.total})`;
+                progress.value = Math.round((scan.current / Math.max(1, scan.total)) * 100);
+                progress.hidden = false;
+              }
               status.textContent = `${scan.message}${suffix}`;
             }
           }

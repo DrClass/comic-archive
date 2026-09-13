@@ -305,6 +305,69 @@ def test_pdf_is_expanded_into_ordered_png_pages(tmp_path):
     assert Path(pdf_path).read_bytes().startswith(b"%PDF")
 
 
+def test_pdf_render_reports_page_progress_and_timing_summary(tmp_path, caplog):
+    fitz = pytest.importorskip("fitz")
+    source = tmp_path / "PDF Progress Comic"
+    source.mkdir()
+    pdf_path = source / "progress.pdf"
+    doc = fitz.open()
+    for _ in range(3):
+        doc.new_page(width=240, height=320)
+    doc.save(pdf_path)
+    doc.close()
+
+    events = []
+    caplog.set_level("INFO", logger="comic_archive.scanner")
+    scan_folder(
+        source,
+        pdf_cache_root=tmp_path / "pdf-cache",
+        progress=lambda phase, current, total, message: events.append((phase, current, total, message)),
+    )
+
+    pdf_events = [event for event in events if event[0] == "rendering_pdf"]
+    assert [(event[1], event[2]) for event in pdf_events] == [(0, 3), (1, 3), (2, 3), (3, 3)]
+    assert all(event[3] == "Rendering PDF: progress.pdf" for event in pdf_events)
+
+    summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
+    assert "pages=3" in summary
+    assert "rendered=3" in summary
+    assert "cached=0" in summary
+    assert "load_elapsed=" in summary
+    assert "raster_elapsed=" in summary
+    assert "save_elapsed=" in summary
+    assert "output_bytes=" in summary
+
+
+def test_pdf_render_progress_reports_cache_reuse(tmp_path, caplog):
+    fitz = pytest.importorskip("fitz")
+    source = tmp_path / "PDF Cache Comic"
+    source.mkdir()
+    pdf_path = source / "cached.pdf"
+    doc = fitz.open()
+    doc.new_page(width=200, height=300)
+    doc.new_page(width=200, height=300)
+    doc.save(pdf_path)
+    doc.close()
+    cache = tmp_path / "pdf-cache"
+
+    scan_folder(source, pdf_cache_root=cache)
+    caplog.clear()
+    caplog.set_level("INFO", logger="comic_archive.scanner")
+    events = []
+    scan_folder(
+        source,
+        pdf_cache_root=cache,
+        progress=lambda phase, current, total, message: events.append((phase, current, total, message)),
+    )
+
+    assert [(current, total) for phase, current, total, _ in events if phase == "rendering_pdf"] == [
+        (0, 2), (1, 2), (2, 2)
+    ]
+    summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
+    assert "rendered=0" in summary
+    assert "cached=2" in summary
+
+
 def test_pdf_inside_issue_with_extras_stays_primary_and_extras_stay_separate(tmp_path):
     import fitz
 

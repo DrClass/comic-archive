@@ -293,7 +293,12 @@ def _find_content_root(
         current = media_children[0]
 
 
-def _render_pdf_pages(pdf_path: Path, relative_to: Path, pdf_cache_root: Path) -> list[tuple[Path, Path, MediaKind, str]]:
+def _render_pdf_pages(
+    pdf_path: Path,
+    relative_to: Path,
+    pdf_cache_root: Path,
+    progress: ScanProgress | None = None,
+) -> list[tuple[Path, Path, MediaKind, str]]:
     try:
         import fitz  # PyMuPDF
     except ImportError as exc:  # pragma: no cover - dependency guard
@@ -307,26 +312,78 @@ def _render_pdf_pages(pdf_path: Path, relative_to: Path, pdf_cache_root: Path) -
     display_dir = pdf_path.relative_to(relative_to).parent / f"{pdf_path.stem}_pdf_pages"
 
     rendered: list[tuple[Path, Path, MediaKind, str]] = []
+    open_started = time.monotonic()
     try:
         with fitz.open(pdf_path) as document:
+            open_elapsed = time.monotonic() - open_started
             if document.page_count < 1:
                 raise FolderScanError(f"PDF has no pages: {pdf_path}")
+            page_count = document.page_count
             render_started = time.monotonic()
-            logger.info("pdf render started file=%s pages=%d", pdf_path, document.page_count)
-            width = max(4, len(str(document.page_count)))
-            for page_index in range(document.page_count):
-                name = f"{page_index + 1:0{width}d}.png"
+            logger.info(
+                "pdf render started file=%s pages=%d source_bytes=%d open_elapsed=%.3fs",
+                pdf_path, page_count, pdf_path.stat().st_size, open_elapsed,
+            )
+            if progress:
+                progress("rendering_pdf", 0, page_count, f"Rendering PDF: {pdf_path.name}")
+
+            width = max(4, len(str(page_count)))
+            cached_pages = 0
+            rendered_pages = 0
+            output_bytes = 0
+            total_load_seconds = 0.0
+            total_raster_seconds = 0.0
+            total_save_seconds = 0.0
+            slowest_page = 0
+            slowest_page_seconds = 0.0
+
+            for page_index in range(page_count):
+                page_number = page_index + 1
+                name = f"{page_number:0{width}d}.png"
                 destination = output_dir / name
-                if not destination.is_file():
+                page_started = time.monotonic()
+                if destination.is_file():
+                    cached_pages += 1
+                else:
+                    load_started = time.monotonic()
                     page = document.load_page(page_index)
+                    total_load_seconds += time.monotonic() - load_started
+
+                    raster_started = time.monotonic()
                     pixmap = page.get_pixmap(dpi=150, alpha=False)
+                    total_raster_seconds += time.monotonic() - raster_started
+
+                    save_started = time.monotonic()
                     pixmap.save(destination)
+                    total_save_seconds += time.monotonic() - save_started
+                    rendered_pages += 1
+
+                page_bytes = destination.stat().st_size
+                output_bytes += page_bytes
+                page_elapsed = time.monotonic() - page_started
+                if page_elapsed > slowest_page_seconds:
+                    slowest_page = page_number
+                    slowest_page_seconds = page_elapsed
+
                 rendered.append((destination, display_dir / name, MediaKind.IMAGE, "image/png"))
-                if (page_index + 1) % 25 == 0 or page_index + 1 == document.page_count:
+                if progress:
+                    progress("rendering_pdf", page_number, page_count, f"Rendering PDF: {pdf_path.name}")
+                if page_number % 25 == 0 or page_number == page_count:
                     logger.info(
-                        "pdf render progress file=%s page=%d/%d elapsed=%.2fs",
-                        pdf_path, page_index + 1, document.page_count, time.monotonic() - render_started,
+                        "pdf render progress file=%s page=%d/%d rendered=%d cached=%d output_bytes=%d elapsed=%.2fs",
+                        pdf_path, page_number, page_count, rendered_pages, cached_pages, output_bytes,
+                        time.monotonic() - render_started,
                     )
+
+            elapsed = time.monotonic() - render_started
+            logger.info(
+                "pdf render complete file=%s pages=%d rendered=%d cached=%d output_bytes=%d "
+                "open_elapsed=%.3fs load_elapsed=%.3fs raster_elapsed=%.3fs save_elapsed=%.3fs "
+                "total_elapsed=%.3fs slowest_page=%d slowest_page_elapsed=%.3fs",
+                pdf_path, page_count, rendered_pages, cached_pages, output_bytes, open_elapsed,
+                total_load_seconds, total_raster_seconds, total_save_seconds, elapsed,
+                slowest_page, slowest_page_seconds,
+            )
     except FolderScanError:
         raise
     except Exception as exc:
@@ -339,6 +396,7 @@ def _scan_media(
     relative_to: Path,
     pdf_cache_root: Path,
     index: ScanIndex | None = None,
+    progress: ScanProgress | None = None,
 ) -> list[ScannedMedia]:
     supported: list[tuple[Path, Path, MediaKind, str, int | None]] = []
     for path in files:
@@ -348,7 +406,7 @@ def _scan_media(
             continue
         kind, mime = info
         if path.suffix.casefold() == ".pdf":
-            for rendered_path, rendered_relative, rendered_kind, rendered_mime in _render_pdf_pages(path, relative_to, pdf_cache_root):
+            for rendered_path, rendered_relative, rendered_kind, rendered_mime in _render_pdf_pages(path, relative_to, pdf_cache_root, progress):
                 supported.append((rendered_path, rendered_relative, rendered_kind, rendered_mime, None))
         else:
             supported.append((
@@ -371,7 +429,13 @@ def _scan_media(
     ]
 
 
-def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path, index: ScanIndex | None = None) -> list[ScannedGroup]:
+def _scan_extra_groups(
+    directory: Path,
+    relative_to: Path,
+    pdf_cache_root: Path,
+    index: ScanIndex | None = None,
+    progress: ScanProgress | None = None,
+) -> list[ScannedGroup]:
     """Scan extra content while preserving folders as distinct named groups.
 
     An extra container such as ``Extras/`` may itself contain several separately
@@ -382,7 +446,7 @@ def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path,
     groups: list[ScannedGroup] = []
 
     direct_files = _direct_supported_files(directory, index)
-    direct_media = _scan_media(direct_files, directory, pdf_cache_root, index)
+    direct_media = _scan_media(direct_files, directory, pdf_cache_root, index, progress)
     if direct_media:
         groups.append(
             ScannedGroup(
@@ -398,7 +462,7 @@ def _scan_extra_groups(directory: Path, relative_to: Path, pdf_cache_root: Path,
         if _contains_supported_media(child, index)
     ]
     for child in sorted(child_dirs, key=lambda p: natural_path_key(p.relative_to(directory))):
-        groups.extend(_scan_extra_groups(child, relative_to, pdf_cache_root, index))
+        groups.extend(_scan_extra_groups(child, relative_to, pdf_cache_root, index, progress))
 
     return groups
 
@@ -418,6 +482,7 @@ def _scan_single_issue(
     separate_child_folders: bool = False,
     pdf_cache_root: Path,
     index: ScanIndex | None = None,
+    progress: ScanProgress | None = None,
 ) -> tuple[ScannedGroup | None, list[ScannedGroup]]:
     """Scan one issue while preserving meaningful child folders as groups.
 
@@ -481,7 +546,7 @@ def _scan_single_issue(
             walk_container(child)
 
     combined = direct_files + primary_nested_files
-    primary_media = _scan_media(combined, directory, pdf_cache_root, index) if combined else []
+    primary_media = _scan_media(combined, directory, pdf_cache_root, index, progress) if combined else []
 
     primary = None
     if primary_media:
@@ -499,7 +564,7 @@ def _scan_single_issue(
         if resolved in seen:
             continue
         seen.add(resolved)
-        extras.extend(_scan_extra_groups(child, relative_to, pdf_cache_root, index))
+        extras.extend(_scan_extra_groups(child, relative_to, pdf_cache_root, index, progress))
     return primary, extras
 
 
@@ -634,7 +699,7 @@ def scan_folder(
             if _looks_like_extra(child, extra_overrides=extra_overrides, primary_overrides=primary_overrides):
                 report_classification(child, "Scanning series extras")
                 started = time.monotonic()
-                groups = _scan_extra_groups(child, content_root, pdf_cache_root, index)
+                groups = _scan_extra_groups(child, content_root, pdf_cache_root, index, progress)
                 for group in groups:
                     group.series_path = series_path
                     extras.append(group)
@@ -657,6 +722,7 @@ def scan_folder(
                 separate_child_folders=True,
                 pdf_cache_root=pdf_cache_root,
                 index=index,
+                progress=progress,
             )
             if issue_primary is not None:
                 issue_primary.series_path = series_path
@@ -683,7 +749,7 @@ def scan_folder(
         # issue per PDF; the virtual workspace can regroup/reorder them freely.
         if pdf_only_series:
             for pdf_path in sorted(direct_pdfs, key=lambda p: natural_path_key(p.relative_to(content_root))):
-                media = _scan_media([pdf_path], content_root, pdf_cache_root, index)
+                media = _scan_media([pdf_path], content_root, pdf_cache_root, index, progress)
                 issue_key = Path(f"__pdf_issue__/{pdf_path.stem}")
                 primary_group = ScannedGroup(
                     name=pdf_path.stem, relative_path=issue_key, suggested_role=SuggestedRole.PRIMARY,
@@ -696,7 +762,7 @@ def scan_folder(
             extras.append(ScannedGroup(
                 name="Series extras", relative_path=Path("__loose_series_extras__"),
                 suggested_role=SuggestedRole.EXTRA,
-                media=_scan_media(direct_media_files, content_root, pdf_cache_root, index), series_path=Path('.'),
+                media=_scan_media(direct_media_files, content_root, pdf_cache_root, index, progress), series_path=Path('.'),
             ))
     else:
         if progress:
@@ -709,6 +775,7 @@ def scan_folder(
             primary_overrides=primary_overrides,
             pdf_cache_root=pdf_cache_root,
             index=index,
+            progress=progress,
         )
         logger.info(
             "scan one-shot complete path=%s primary_media=%d extra_groups=%d elapsed=%.2fs",
