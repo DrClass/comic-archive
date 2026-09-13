@@ -281,7 +281,7 @@ The application supports:
 -   soft media remove/restore;
 -   issue-extra creation;
 -   audit history;
--   recursive series deletion of managed data;
+-   recursive series deletion and individual issue deletion of managed data;
 -   missing-file/thumbnail checks;
 -   empty-group checks;
 -   incomplete-issue checks;

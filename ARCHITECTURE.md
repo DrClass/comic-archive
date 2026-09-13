@@ -179,7 +179,7 @@ Reader routes: `/read/{issue_id}`, `/read-group/{group_id}`, `/media/{media_id}`
 
 ## Editing/maintenance
 
-Editing: author rename; series edit/move/reorder/delete; issue edit; extra group create/rename/move; media move/reorder; soft remove/restore; audit history. Recursive series deletion removes managed data/files only after confirmation and must never touch original source.
+Editing: author rename; series edit/move/reorder/delete; issue edit/delete; extra group create/rename/move; media move/reorder; soft remove/restore; audit history. Recursive series deletion removes managed data/files only after confirmation and must never touch original source.
 
 Maintenance covers missing managed files/thumbnails, empty groups, incomplete issues, duplicate fingerprints, and numeric gaps. Gaps can be marked intentionally missing with notes.
 

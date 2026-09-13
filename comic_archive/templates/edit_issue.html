@@ -41,4 +41,15 @@
   <button type="submit">Save changes</button>
 </form>
 </section>
+
+<section class="panel danger-zone">
+  <h2>Delete issue</h2>
+  <p class="muted">This permanently deletes this issue, its managed pages, extras, and thumbnails. Other issues in the series and source files outside the managed library are not touched.</p>
+  <form method="post" action="/issues/{{ issue.id }}/delete" onsubmit="return confirm('Permanently delete this issue and its contents?')">
+    <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+    {% set delete_confirmation = issue.title or issue.issue_number or 'One-shot' %}
+    <div class="form-row"><label for="delete-confirmation">Type <strong>{{ delete_confirmation }}</strong> to confirm</label><input id="delete-confirmation" name="confirmation" type="text" autocomplete="off" required></div>
+    <button type="submit" class="danger-button">Delete issue permanently</button>
+  </form>
+</section>
 {% endblock %}

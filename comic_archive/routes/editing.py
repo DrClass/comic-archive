@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..database import connect_database
 from ..editing import (
-    EditError, create_issue_extra_group, delete_series, edit_issue, edit_series,
+    EditError, create_issue_extra_group, delete_issue, delete_series, edit_issue, edit_series,
     get_history, move_extra_group, move_media_to_group, rename_author, rename_group,
     reorder_issues, reorder_media, set_media_active,
 )
@@ -160,6 +160,24 @@ def register_editing_routes(app: FastAPI, templates: Jinja2Templates, database: 
             }, status_code=400)
         refreshed = find_issue(read_library(database), issue_id)
         return RedirectResponse(f"/issues/{issue_id}" if refreshed else "/", status_code=303)
+
+    @app.post("/issues/{issue_id}/delete", response_class=HTMLResponse)
+    async def issue_delete(request: Request, issue_id: str):
+        form = await form_data(request)
+        found = find_issue(read_library(database), issue_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        author, series, issue = found
+        try:
+            series_id = delete_issue(
+                database, library, issue_id, confirmation=form.get("confirmation", "")
+            )
+        except EditError as exc:
+            return templates.TemplateResponse(request=request, name="edit_issue.html", context={
+                "author": author, "series": series, "issue": issue, "primary": primary_group(issue),
+                "series_choices": _series_choices(database), "error": str(exc),
+            }, status_code=400)
+        return RedirectResponse(f"/series/{series_id}", status_code=303)
 
     @app.post("/issues/{issue_id}/groups")
     async def issue_group_create(request: Request, issue_id: str):

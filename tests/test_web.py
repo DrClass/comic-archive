@@ -2834,6 +2834,65 @@ def test_confirm_page_has_duplicate_submit_guard_and_processing_indicator(tmp_pa
     assert "<progress" in confirm.text
 
 
+
+def test_issue_can_be_deleted_without_deleting_series(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    client = _admin_client(database, library)
+    issue_id = result.issue_ids[0]
+    issue = read_library(database)[0].series[0].issues[0]
+    managed_paths = [library / media.stored_path for group in issue.groups for media in group.media]
+    source = tmp_path / "source"
+    source_before = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+
+    edit_page = client.get(f"/issues/{issue_id}/edit")
+    assert edit_page.status_code == 200
+    assert "Delete issue" in edit_page.text
+
+    for csrf_fields in ({}, {"csrf_token": "invalid"}):
+        denied = client.post(
+            f"/issues/{issue_id}/delete",
+            data={"confirmation": "Opening", **csrf_fields},
+            follow_redirects=False,
+        )
+        assert denied.status_code == 403
+        assert all(path.exists() for path in managed_paths)
+
+    wrong = _post(
+        client, f"/issues/{issue_id}/delete", data={"confirmation": "wrong"}, follow_redirects=False
+    )
+    assert wrong.status_code == 400
+    assert all(path.exists() for path in managed_paths)
+
+    response = _post(
+        client, f"/issues/{issue_id}/delete", data={"confirmation": "Opening"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/series/{result.series_id}"
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT 1 FROM series WHERE id = ?", (result.series_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM issues WHERE id = ?", (issue_id,)).fetchone() is None
+    assert all(not path.exists() for path in managed_paths)
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == source_before
+
+
+def test_regular_user_cannot_delete_issue(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    create_user(database, "reader", "reader-password-123", is_admin=False)
+    client = TestClient(create_app(database, library, tmp_path / "staging"))
+    login = _post(client, "/login", data={
+        "username": "reader", "password": "reader-password-123",
+    }, follow_redirects=False)
+    assert login.status_code == 303
+
+    response = _post(
+        client, f"/issues/{result.issue_ids[0]}/delete",
+        data={"confirmation": "Opening"}, follow_redirects=False,
+    )
+    assert response.status_code == 403
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT 1 FROM issues WHERE id = ?", (result.issue_ids[0],)).fetchone()
+
+
 def test_regular_user_can_view_series_but_cannot_delete_it(tmp_path: Path):
     database, library, result = _make_library(tmp_path)
     create_user(database, "reader", "reader-password-123", is_admin=False)

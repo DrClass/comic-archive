@@ -567,6 +567,81 @@ def get_history(
         return history
 
 
+def delete_issue(
+    database_path: str | Path,
+    library_root: str | Path,
+    issue_id: str,
+    *,
+    confirmation: str,
+) -> str:
+    """Delete one issue and its managed media without touching source files."""
+    library = Path(library_root).expanduser().resolve()
+    managed_group_dirs: set[Path] = set()
+    with _connect(database_path) as db:
+        row = db.execute(
+            "SELECT id, series_id, issue_number, title, complete FROM issues WHERE id = ?",
+            (issue_id,),
+        ).fetchone()
+        if not row:
+            raise EditError(f"Issue not found: {issue_id}")
+
+        expected_confirmation = row["title"] or row["issue_number"] or "One-shot"
+        if confirmation != expected_confirmation:
+            raise EditError("Confirmation text does not match the issue")
+
+        groups = db.execute(
+            "SELECT id FROM content_groups WHERE issue_id = ? ORDER BY sort_order, id",
+            (issue_id,),
+        ).fetchall()
+        group_ids = [group["id"] for group in groups]
+        media_rows = db.execute(
+            """SELECT m.id, m.stored_path
+               FROM media m
+               JOIN content_groups g ON g.id = m.group_id
+               WHERE g.issue_id = ?""",
+            (issue_id,),
+        ).fetchall()
+
+        series_root = (library / "series").resolve()
+        for media in media_rows:
+            group_dir = (library / media["stored_path"]).resolve().parent
+            try:
+                group_dir.relative_to(series_root)
+            except ValueError:
+                continue
+            if group_dir.name in group_ids and group_dir.parent.name == "groups":
+                managed_group_dirs.add(group_dir)
+
+        # Empty groups have no media row from which to recover their physical
+        # location. Look only for the exact ID-based group directory name.
+        if series_root.is_dir():
+            for group_id in group_ids:
+                for candidate in series_root.glob(f"*/groups/{group_id}"):
+                    candidate = candidate.resolve()
+                    try:
+                        candidate.relative_to(series_root)
+                    except ValueError:
+                        continue
+                    if candidate.is_dir():
+                        managed_group_dirs.add(candidate)
+
+        before = {
+            "series_id": row["series_id"],
+            "issue_number": row["issue_number"],
+            "title": row["title"],
+            "complete": row["complete"],
+            "group_count": len(group_ids),
+            "media_count": len(media_rows),
+        }
+        _audit(db, entity_type="issue", entity_id=issue_id, action="delete", before=before, after=None)
+        db.execute("DELETE FROM issues WHERE id = ?", (issue_id,))
+        series_id = row["series_id"]
+
+    for group_dir in managed_group_dirs:
+        shutil.rmtree(group_dir, ignore_errors=True)
+    return series_id
+
+
 def delete_series(database_path: str | Path, library_root: str | Path, series_id: str, *, confirmation: str) -> tuple[str, str | None]:
     """Delete a series tree and its managed files.
 

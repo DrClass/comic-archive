@@ -5,6 +5,7 @@ import pytest
 
 from comic_archive.editing import (
     EditError,
+    delete_issue,
     edit_issue,
     edit_series,
     get_history,
@@ -209,3 +210,39 @@ def test_issue_order_can_be_changed_after_import(tmp_path: Path) -> None:
     by_title = {issue.title: issue.id for issue in series.issues}
     reorder_issues(db, result.series_id, [by_title["Zebra"], by_title["Middle"], by_title["Alpha"]])
     assert [issue.title for issue in read_library(db)[0].series[0].issues] == ["Zebra", "Middle", "Alpha"]
+
+
+def test_delete_issue_removes_only_its_database_rows_and_managed_files(tmp_path: Path) -> None:
+    source = tmp_path / "series"
+    touch(source / "1" / "001.jpg", b"issue-one")
+    touch(source / "2" / "001.jpg", b"issue-two")
+    staged = build_staged_import(
+        build_review_plan(scan_folder(source)),
+        author="Artist",
+        series="Comic",
+        issue_metadata={
+            "1": {"issue_number": "1", "title": "First"},
+            "2": {"issue_number": "2", "title": "Second"},
+        },
+    )
+    db = tmp_path / "archive.sqlite3"
+    library = tmp_path / "library"
+    result = commit_staged_import(staged, library_root=library, database_path=db)
+    first, second = read_library(db)[0].series[0].issues
+    first_paths = [library / media.stored_path for group in first.groups for media in group.media]
+    second_paths = [library / media.stored_path for group in second.groups for media in group.media]
+    source_before = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+
+    with pytest.raises(EditError, match="Confirmation"):
+        delete_issue(db, library, first.id, confirmation="wrong")
+    assert all(path.exists() for path in first_paths + second_paths)
+
+    returned_series_id = delete_issue(db, library, first.id, confirmation="First")
+    assert returned_series_id == result.series_id
+    remaining = read_library(db)[0].series[0].issues
+    assert [issue.id for issue in remaining] == [second.id]
+    assert all(not path.exists() for path in first_paths)
+    assert all(path.exists() for path in second_paths)
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == source_before
+    history = get_history(db)
+    assert any(item["entity_type"] == "issue" and item["entity_id"] == first.id and item["action"] == "delete" for item in history)

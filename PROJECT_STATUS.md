@@ -26,7 +26,7 @@ TODO.md mirrors the outstanding requests, which are also recorded below.
 - Image/MP4 reader with single-page/vertical modes, navigation, preferences,
   per-user progress, resume and issue-level Mark unread.
 - Audited editing, reordering, soft media removal/restoration, recursive managed
-  series deletion with admin/CSRF/title checks, and maintenance reports for gaps,
+  series and individual issue deletion with admin/CSRF/confirmation checks, and maintenance reports for gaps,
   missing files/thumbnails, empty groups, incomplete issues and duplicates.
 - Server-folder import and browser folder upload, bulk artist import, JPG/JPEG/
   PNG/GIF/MP4/PDF input, PDF-to-JPEG rendering, editable virtual workspace, synthetic
