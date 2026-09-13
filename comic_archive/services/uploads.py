@@ -61,10 +61,13 @@ def persist_browser_upload_session(app: FastAPI, upload_id: str, session: Browse
 
 def reconcile_browser_upload_files(session: BrowserUploadSession) -> None:
     content_root = session.upload_root / "content"
-    if not content_root.is_dir():
-        return
     recovered: set[str] = set()
-    for root, _dirs, files in os.walk(content_root):
+
+    def fail_scan(error: OSError) -> None:
+        # A partial directory scan cannot establish authoritative completion.
+        raise error
+
+    for root, _dirs, files in os.walk(content_root, onerror=fail_scan):
         root_path = Path(root)
         for name in files:
             if name.endswith(".part"):
@@ -75,8 +78,9 @@ def reconcile_browser_upload_files(session: BrowserUploadSession) -> None:
             except ValueError:
                 continue
             recovered.add(relative)
-    if recovered:
-        session.received_paths.update(recovered)
+    # Only publish after a successful scan, including an empty result. Saved
+    # checkpoints may name missing files or omit recently completed files.
+    session.received_paths = recovered
 
 
 def checkpoint_browser_upload_session(

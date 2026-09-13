@@ -30,6 +30,7 @@ from .library import read_library
 from .maintenance import series_gaps
 from .auth import get_or_create_session_secret, get_user, initialize_auth_database
 from .database import connect_database
+from .logging_config import configure_logging
 from .routes.auth import register_auth_routes
 from .routes.library import register_library_routes
 from .routes.editing import register_editing_routes
@@ -62,7 +63,6 @@ from .services.import_sessions import (
 
 
 from .services.diagnostics import (
-    configure_diagnostic_logging as _configure_diagnostic_logging,
     log_memory_checkpoint as _log_memory_checkpoint,
     run_background_io as _run_background_io,
     logger,
@@ -87,7 +87,6 @@ from .services.uploads import (
 _TEMPLATE_DIR = Path(__file__).with_name("templates")
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
-_configure_diagnostic_logging()
 
 UPLOAD_SWEEP_INTERVAL_SECONDS = 60 * 60
 
@@ -113,7 +112,13 @@ def create_app(
     staging_root: str | Path = "./staging",
     secure_cookies: bool = False,
     import_root: str | Path | None = None,
+    log_file: str | Path | None = None,
+    log_level: str = "INFO",
 ) -> FastAPI:
+    log_path = configure_logging(
+        log_file if log_file is not None else Path(database_path).expanduser().absolute().parent / "logs" / "comic-archive.log",
+        level=log_level,
+    )
     database = initialize_database(database_path)
     initialize_auth_database(database)
     library = Path(library_root).expanduser().resolve()
@@ -122,6 +127,7 @@ def create_app(
 
     app = FastAPI(title="Comic Archive", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.database_path = database
+    app.state.log_file = log_path
     app.state.library_root = library
     app.state.staging_root = staging
     app.state.import_root = imports
@@ -182,7 +188,7 @@ def create_app(
                 path.startswith("/media/")
                 or path.startswith("/groups/")
                 or path.startswith("/issues/")
-                or (path.startswith("/series/") and "/missing/" in path)
+                or path.startswith("/series/")
             ))
         )
         if admin_only and not user.is_admin:

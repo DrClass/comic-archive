@@ -23,12 +23,12 @@ def test_recursive_subseries_scan_and_stage(tmp_path: Path) -> None:
     touch(source / "Volume 1" / "Arc B" / "Chapter 3" / "001.jpg")
 
     scan = scan_folder(source, subseries_folders=["Volume 1", "Volume 1/Arc A", "Volume 1/Arc B"])
-    assert [(str(item.relative_path), str(item.parent_path)) for item in scan.subseries] == [
+    assert [(item.relative_path.as_posix(), item.parent_path.as_posix()) for item in scan.subseries] == [
         ("Volume 1", "."),
         ("Volume 1/Arc A", "Volume 1"),
         ("Volume 1/Arc B", "Volume 1"),
     ]
-    assert {str(issue.series_path) for issue in scan.issues} == {"Volume 1/Arc A", "Volume 1/Arc B"}
+    assert {issue.series_path.as_posix() for issue in scan.issues} == {"Volume 1/Arc A", "Volume 1/Arc B"}
 
     plan = build_review_plan(scan)
     assert [item.role for item in plan.items if item.source_kind == "subseries"] == [
@@ -39,10 +39,10 @@ def test_recursive_subseries_scan_and_stage(tmp_path: Path) -> None:
     staged = build_staged_import(plan, author="Artist", series="Comic")
     assert [(item.source_key, item.parent_key) for item in staged.subseries] == [
         ("Volume 1", "."),
-        ("Volume 1/Arc A", "Volume 1"),
-        ("Volume 1/Arc B", "Volume 1"),
+        (str(Path("Volume 1") / "Arc A"), "Volume 1"),
+        (str(Path("Volume 1") / "Arc B"), "Volume 1"),
     ]
-    assert {issue.series_key for issue in staged.issues} == {"Volume 1/Arc A", "Volume 1/Arc B"}
+    assert {issue.series_key for issue in staged.issues} == {str(Path("Volume 1") / "Arc A"), str(Path("Volume 1") / "Arc B")}
 
 
 def test_nested_series_commit_and_recursive_totals(tmp_path: Path) -> None:

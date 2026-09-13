@@ -24,7 +24,7 @@ def test_scans_primary_and_extra_groups(tmp_path: Path) -> None:
 
     assert result.primary is not None
     assert result.primary.suggested_role is SuggestedRole.PRIMARY
-    assert [str(item.relative_path) for item in result.primary.media] == [
+    assert [item.relative_path.as_posix() for item in result.primary.media] == [
         "1.jpg",
         "2.png",
         "10.mp4",
@@ -32,7 +32,7 @@ def test_scans_primary_and_extra_groups(tmp_path: Path) -> None:
     assert result.primary.media[-1].media_kind is MediaKind.VIDEO
 
     assert [group.name for group in result.extras] == ["Bonus", "Textless"]
-    assert [str(item.relative_path) for item in result.extras[0].media] == [
+    assert [item.relative_path.as_posix() for item in result.extras[0].media] == [
         "render2.png",
         "render10.png",
     ]
@@ -58,7 +58,7 @@ def test_nested_extra_folders_stay_separate_groups(tmp_path: Path) -> None:
 
     result = scan_folder(tmp_path)
 
-    assert [(group.name, str(group.relative_path)) for group in result.extras] == [
+    assert [(group.name, group.relative_path.as_posix()) for group in result.extras] == [
         ("Animations", "Extras/Animations"),
         ("Renders", "Extras/Renders"),
     ]
@@ -144,7 +144,7 @@ def test_explicit_extra_folder_override(tmp_path: Path) -> None:
 
     without_hint = scan_folder(tmp_path)
     assert without_hint.primary is not None
-    assert [str(item.relative_path) for item in without_hint.primary.media] == [
+    assert [item.relative_path.as_posix() for item in without_hint.primary.media] == [
         "001.jpg",
         "002.jpg",
         "Alternate Views/angle1.png",
@@ -164,7 +164,7 @@ def test_explicit_primary_folder_override_beats_extra_name(tmp_path: Path) -> No
     result = scan_folder(tmp_path, primary_folders=["Bonus"])
 
     assert result.primary is not None
-    assert [str(item.relative_path) for item in result.primary.media] == [
+    assert [item.relative_path.as_posix() for item in result.primary.media] == [
         "001.jpg",
         "Bonus/002.jpg",
         "Bonus/003.jpg",
@@ -180,7 +180,7 @@ def test_nested_extra_container_preserves_separate_groups(tmp_path: Path) -> Non
 
     result = scan_folder(tmp_path)
 
-    assert [(group.name, str(group.relative_path)) for group in result.extras] == [
+    assert [(group.name, group.relative_path.as_posix()) for group in result.extras] == [
         ("Extra Angles", "Extras/Extra Angles"),
         ("Textless", "Extras/Textless"),
     ]
@@ -194,7 +194,7 @@ def test_extra_folder_with_direct_and_nested_media_keeps_both_groups(tmp_path: P
 
     result = scan_folder(tmp_path)
 
-    assert [(group.name, str(group.relative_path)) for group in result.extras] == [
+    assert [(group.name, group.relative_path.as_posix()) for group in result.extras] == [
         ("Extras", "Extras"),
         ("Textless", "Extras/Textless"),
     ]
@@ -222,8 +222,8 @@ def test_nested_extra_below_page_container_is_not_flattened_into_primary(tmp_pat
     result = scan_folder(tmp_path)
 
     assert result.primary is not None
-    assert [str(item.relative_path) for item in result.primary.media] == ["001.jpg", "002.jpg"]
-    assert [(group.name, str(group.relative_path)) for group in result.extras] == [
+    assert [item.relative_path.as_posix() for item in result.primary.media] == ["001.jpg", "002.jpg"]
+    assert [(group.name, group.relative_path.as_posix()) for group in result.extras] == [
         ("Extras", "Extras")
     ]
     assert [item.relative_path.name for item in result.extras[0].media] == ["bonus.png"]
@@ -261,7 +261,7 @@ def test_series_issue_sibling_folder_defaults_to_extra_when_direct_pages_exist(t
     first = result.issues[0]
     assert first.primary is not None
     assert [item.relative_path.name for item in first.primary.media] == ["001.jpg", "002.jpg"]
-    assert [(group.name, str(group.relative_path)) for group in first.extras] == [
+    assert [(group.name, group.relative_path.as_posix()) for group in first.extras] == [
         ("Alternate Material", "issue 1/Alternate Material")
     ]
 

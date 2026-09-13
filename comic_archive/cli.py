@@ -364,7 +364,14 @@ def main() -> int:
     history.add_argument("--database", default="./comic_archive.sqlite3", help="SQLite database path")
     history.add_argument("--entity-id")
 
+    for command_parser in (scan, review, stage, commit, library, edit, serve, user_add, thumbs, history):
+        command_parser.add_argument("--log-file", help="Application log path (default: logs/comic-archive.log beside the database, or in the working directory)")
+        command_parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"), default="INFO")
     args = parser.parse_args()
+    from .logging_config import configure_logging
+    log_path = Path(getattr(args, "database", "./comic_archive.sqlite3")).expanduser().absolute().parent / "logs" / "comic-archive.log"
+    if args.command != "serve":
+        configure_logging(args.log_file or log_path, level=args.log_level)
     try:
         if args.command == "scan":
             print_scan(args.folder, extra_folders=args.extra_folder, primary_folders=args.primary_folder)
@@ -452,9 +459,12 @@ def main() -> int:
                     args.staging,
                     secure_cookies=args.secure_cookies,
                     import_root=args.import_root,
+                    log_file=args.log_file,
+                    log_level=args.log_level,
                 ),
                 host=args.host,
                 port=args.port,
+                log_config=None,
             )
             return 0
         if args.command == "thumbnails-build":

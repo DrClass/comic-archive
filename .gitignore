@@ -10,6 +10,9 @@ venv/
 *.sqlite3
 library/
 staging/
+logs/
+*.log
+*.log.[0-9]*
 
 # Environment / secrets
 .env

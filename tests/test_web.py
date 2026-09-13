@@ -2002,6 +2002,72 @@ def test_resumable_upload_session_accepts_files_individually_and_finalizes(tmp_p
     assert root.exists()  # ownership transferred to the import session
 
 
+def test_upload_recovery_drops_missing_files_and_allows_reupload(tmp_path: Path):
+    from comic_archive.services.uploads import persist_browser_upload_session
+
+    client = _admin_client(tmp_path / "db.sqlite3", tmp_path / "library", tmp_path / "staging")
+    upload_id = _create_browser_upload(client, mode="single", expected_files=2)
+    for name in ("001.jpg", "002.jpg"):
+        assert _send_browser_upload_file(client, upload_id, f"Comic/{name}", name.encode()).status_code == 200
+    session = client.app.state.upload_sessions[upload_id]
+    persist_browser_upload_session(client.app, upload_id, session)
+    content = session.upload_root / "content"
+    (content / "Comic/002.jpg").unlink()
+    (content / "Comic/002.jpg.part").write_bytes(b"unfinished")
+    client.app.state.upload_sessions.clear()
+
+    status = client.get(f"/import/upload-session/{upload_id}/status")
+    assert status.status_code == 200
+    assert status.json()["received_files"] == 1
+    assert client.app.state.upload_sessions[upload_id].received_paths == {"Comic/001.jpg"}
+    assert _post(client, f"/import/upload-session/{upload_id}/finalize").status_code == 409
+    assert _send_browser_upload_file(client, upload_id, "Comic/002.jpg", b"replacement").status_code == 200
+    assert _post(client, f"/import/upload-session/{upload_id}/finalize").status_code == 200
+    assert (content / "Comic/002.jpg").read_bytes() == b"replacement"
+
+
+def test_upload_reconciliation_replaces_stale_entries_even_when_empty(tmp_path: Path):
+    from comic_archive.services.uploads import BrowserUploadSession, reconcile_browser_upload_files
+
+    content = tmp_path / "content"
+    content.mkdir()
+    session = BrowserUploadSession(tmp_path, "single", 2, received_paths={"missing.jpg"})
+    (content / "unfinished.jpg.part").write_bytes(b"partial")
+    reconcile_browser_upload_files(session)
+    assert session.received_paths == set()
+    (content / "uncheckpointed.jpg").write_bytes(b"complete")
+    session.received_paths.add("another-missing.jpg")
+    reconcile_browser_upload_files(session)
+    assert session.received_paths == {"uncheckpointed.jpg"}
+
+
+def test_upload_recovery_rejects_partial_directory_scan(tmp_path: Path, monkeypatch):
+    import pytest
+    import comic_archive.services.uploads as uploads
+
+    client = _admin_client(tmp_path / "db.sqlite3", tmp_path / "library", tmp_path / "staging")
+    upload_id = _create_browser_upload(client, mode="single", expected_files=1)
+    session = client.app.state.upload_sessions[upload_id]
+    session.received_paths = {"saved.jpg"}
+    uploads.persist_browser_upload_session(client.app, upload_id, session)
+    state_file = tmp_path / "staging/session_state" / f"browser_upload_{upload_id}.json"
+    saved_state = state_file.read_bytes()
+
+    def partial_walk(root, *, onerror=None):
+        yield str(root), ["unreadable"], ["found.jpg"]
+        if onerror is not None:
+            onerror(PermissionError("injected directory read failure"))
+
+    monkeypatch.setattr(uploads.os, "walk", partial_walk)
+    with pytest.raises(PermissionError):
+        uploads.reconcile_browser_upload_files(session)
+    assert session.received_paths == {"saved.jpg"}
+    client.app.state.upload_sessions.clear()
+    assert uploads.restore_browser_upload_session(client.app, upload_id) is None
+    assert upload_id not in client.app.state.upload_sessions
+    assert state_file.read_bytes() == saved_state
+
+
 def test_resumable_upload_session_restores_after_server_restart(tmp_path: Path):
     database = tmp_path / "archive.sqlite3"
     library = tmp_path / "library"
@@ -2768,11 +2834,48 @@ def test_confirm_page_has_duplicate_submit_guard_and_processing_indicator(tmp_pa
     assert "<progress" in confirm.text
 
 
+def test_regular_user_can_view_series_but_cannot_delete_it(tmp_path: Path):
+    database, library, result = _make_library(tmp_path)
+    create_user(database, "reader", "reader-password-123", is_admin=False)
+    client = TestClient(create_app(database, library, tmp_path / "staging"))
+    login = _post(client, "/login", data={
+        "username": "reader", "password": "reader-password-123",
+    }, follow_redirects=False)
+    assert login.status_code == 303
+    assert client.get(f"/series/{result.series_id}").status_code == 200
+
+    managed_before = {p.relative_to(library): p.read_bytes() for p in library.rglob("*") if p.is_file()}
+    source = tmp_path / "source"
+    source_before = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    with sqlite3.connect(database) as db:
+        database_before = list(db.iterdump())
+
+    response = _post(client, f"/series/{result.series_id}/delete",
+                     data={"confirmation": "Example Comic"}, follow_redirects=False)
+    assert response.status_code == 403
+    with sqlite3.connect(database) as db:
+        assert list(db.iterdump()) == database_before
+    assert {p.relative_to(library): p.read_bytes() for p in library.rglob("*") if p.is_file()} == managed_before
+    assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == source_before
+    assert client.get(f"/series/{result.series_id}").status_code == 200
+
+
 def test_series_can_be_deleted_with_managed_files(tmp_path: Path):
     database, library, result = _make_library(tmp_path)
     client = _admin_client(database, library)
     managed_dir = library / "series" / result.series_id
     assert managed_dir.exists()
+
+    source = tmp_path / "source"
+    source_before = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    for csrf_fields in ({}, {"csrf_token": "invalid"}):
+        denied = client.post(f"/series/{result.series_id}/delete",
+                             data={"confirmation": "Example Comic", **csrf_fields},
+                             follow_redirects=False)
+        assert denied.status_code == 403
+        assert managed_dir.exists()
+        with sqlite3.connect(database) as db:
+            assert db.execute("SELECT 1 FROM series WHERE id = ?", (result.series_id,)).fetchone()
 
     wrong = _post(client, f"/series/{result.series_id}/delete", data={"confirmation": "wrong"}, follow_redirects=False)
     assert wrong.status_code == 400
@@ -2784,6 +2887,7 @@ def test_series_can_be_deleted_with_managed_files(tmp_path: Path):
         assert db.execute("SELECT 1 FROM series WHERE id = ?", (result.series_id,)).fetchone() is None
         assert db.execute("SELECT 1 FROM issues WHERE series_id = ?", (result.series_id,)).fetchone() is None
     assert not managed_dir.exists()
+    assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == source_before
 
 
 def test_workspace_can_create_synthetic_issue_and_move_pages_into_it(tmp_path: Path):

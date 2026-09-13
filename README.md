@@ -1,678 +1,526 @@
-# Comic Archive — Milestone 4: Commit layer
+# Comic Archive
 
-Current importer workflow:
+Comic Archive is a private, account-gated web application for importing,
+organizing, browsing, and reading a personal digital comic collection.
 
-1. `scan` — read-only folder scan.
-2. `review` — correct scanner classifications.
-3. `stage` — save reviewed metadata to a JSON staging record.
-4. `commit` — validate the staging record, copy media into normalized storage, and create/update SQLite records.
+The project is intentionally lightweight: Python, FastAPI, Jinja2,
+SQLite, and a managed filesystem library. It is designed for collections
+that arrive in inconsistent folder structures and may contain normal
+image pages, PDFs, animations, videos, extras, nested sub-series,
+missing issue numbers, and incomplete material.
 
-Supported media currently: `.jpg`, `.jpeg`, `.png`, `.gif`, `.mp4`.
+## Current project state
 
-The commit step **copies** files. It does not move, rename, convert, delete, or otherwise modify source archive files.
+The current development baseline is **Milestone 45 plus post-handoff maintenance
+(2026-09-13)**. The working tree includes security, recovery, thumbnail reliability
+and file-logging changes beyond the original Milestone 45 package.
 
-## Scan
+Milestone 42 completed the major structural refactor. Feature routes and
+importer services were moved out of the former monolithic `web.py`.
+Milestones 43-45 then began substantive performance work.
 
-```bash
-python -m comic_archive.cli scan "/path/to/comic/folder"
+Current automated regression count: **201 passed, 0 failed, 0 skipped** on
+Windows/Python 3.10. The original Milestone 45 baseline was 182 tests.
+
+The latest known large-comic improvements are:
+
+-   workspace construction no longer recursively re-walks the filesystem
+    after scanning;
+-   automatic ownership resolution no longer performs media x
+    workspace-node work;
+-   immutable scanner folder/media membership is indexed once and
+    reused;
+-   automatic page ownership is cached separately from explicit page
+    moves;
+-   page-move destination validation avoids quadratic workspace
+    rebuilding;
+-   staged-import construction precomputes semantic ancestry;
+-   JPEG thumbnail generation uses decoder-level downsampling before
+    final resize.
+
+A synthetic 400-issue / 1,200-page ownership-cache test improved from
+roughly 3 seconds per build/rebuild to roughly 0.05-0.06 seconds. A
+synthetic 300-page large-JPEG commit improved from roughly 11 seconds to
+roughly 3.3 seconds. These are development benchmarks, not production
+guarantees.
+
+The recommended next development task is the reported validation-button lockup
+after an error. The next performance-validation task remains a large real import
+with captured logs and phase timings. See PROJECT_STATUS.md for unresolved work.
+
+## Technology
+
+-   Python 3.10+
+-   FastAPI
+-   Jinja2
+-   SQLite
+-   Pillow
+-   PyMuPDF for PDF page rendering
+-   Argon2 password hashing
+-   Uvicorn
+-   Caddy in production
+
+The package metadata and optional dependencies are defined in
+`pyproject.toml`.
+
+For development/web dependencies:
+
+``` bash
+python -m pip install -e '.[web,dev]'
 ```
 
-## Review
+## Running locally
 
-```bash
-python -m comic_archive.cli review "/path/to/comic/folder"
+Create an administrator account:
+
+``` bash
+comic-import user-add admin --admin --database ./comic_archive.sqlite3
 ```
 
-## Stage
+Start the application:
 
-```bash
-python -m comic_archive.cli stage "/path/to/comic/folder" --output ./staging/import.json
-```
-
-## Commit
-
-```bash
-python -m comic_archive.cli commit ./staging/import.json \
+``` bash
+comic-import serve \
+  --database ./comic_archive.sqlite3 \
   --library ./library \
-  --database ./comic_archive.sqlite3
+  --staging ./staging \
+  --import-root /path/to/import/source \
+  --host 127.0.0.1 \
+  --port 8000
 ```
 
-Before copying, commit verifies that every staged source file still exists and has the same byte size it had during scanning. The same staging record cannot be committed twice.
+When running behind HTTPS/Caddy, add:
 
-Storage uses stable IDs rather than artist/series names:
+``` bash
+--secure-cookies
+```
 
-```text
+There is no public signup flow.
+
+## Production deployment
+
+The established production URL is:
+
+`https://comics.super-original.net`
+
+The intended production arrangement is:
+
+``` text
+Internet
+  -> Caddy / HTTPS
+  -> one Uvicorn Comic Archive process
+  -> SQLite + managed library filesystem
+```
+
+The application should normally bind to localhost behind Caddy.
+Production should use `--secure-cookies`.
+
+## Library model
+
+The logical hierarchy is:
+
+``` text
+Author
+  -> Series
+       -> direct Issues
+       -> child Sub-Series
+            -> Issues
+```
+
+A series may contain **direct issues and child sub-series at the same
+time**.
+
+Sub-series are represented recursively through
+`series.parent_series_id`.
+
+Issue numbers do not need to be continuous. Missing numeric issues can
+be marked intentional and optionally given a note.
+
+Content groups can represent primary pages, issue extras, or series
+extras.
+
+## Supported importer media
+
+The scanner accepts:
+
+-   `.jpg`
+-   `.jpeg`
+-   `.png`
+-   `.gif`
+-   `.mp4`
+-   `.pdf`
+
+PDF is an importer input format only. PDF pages are rendered to PNG for
+the managed library; the source PDF is not modified.
+
+The importer does not currently require CBZ support and does not convert
+normal image originals.
+
+## Managed storage
+
+Imported source material is never moved or deleted by the normal import
+process.
+
+Committed media is copied into ID-based managed storage resembling:
+
+``` text
 library/
-└── series/
-    └── <series-id>/
-        └── groups/
-            └── <group-id>/
-                ├── 000001.jpg
-                ├── 000002.png
-                └── ...
+  series/
+    <series-id>/
+      groups/
+        <group-id>/
+          000001.jpg
+          000002.jpg
+          ...
+          _thumbs/
+            <media-id>.jpg
 ```
 
-Display names and relationships live in SQLite. Separate extras such as `Textless`, `Extra Angles`, and `Covers` remain separate content-group records.
+This deliberately separates logical metadata from original source folder
+naming.
 
-## Test
+Temporary browser uploads and recoverable import state live under the
+configured staging directory.
 
-```bash
-python -m pytest
+## Import workflow
+
+The web importer is designed around this conceptual pipeline:
+
+``` text
+Source/upload
+  -> scanner
+  -> editable workspace
+  -> staged import
+  -> commit
+  -> managed library + SQLite
 ```
 
-## Current milestone commands
+Important characteristics:
 
-Inspect committed data:
+-   raw browser uploads are streamed rather than held as multipart
+    bodies in memory;
+-   browser upload sessions are restart-safe and periodically
+    checkpointed;
+-   scan work runs off the main request path and reports progress;
+-   workspace classification is editable without modifying source files;
+-   virtual issues/sub-series/groups can be created;
+-   media can be reassigned, ignored, restored, and reordered;
+-   validation builds a staged import before commit;
+-   commit is designed to be idempotent/recoverable;
+-   duplicate content is detected using ordered media SHA-256
+    fingerprints;
+-   commit progress includes copying and thumbnail generation;
+-   ordinary thumbnail failures are logged without aborting valid imports;
+    derivatives are published atomically and can be retried;
+-   upload recovery drops missing completed files and rejects directory-read
+    errors rather than accepting an incomplete filesystem scan.
 
-```bash
-python -m comic_archive.cli library --database ./comic_archive.sqlite3
+## Workspace roles
+
+The workspace supports roles including:
+
+-   Series
+-   Sub-Series
+-   Issue
+-   Issue-Extras
+-   Series-Extras
+-   Primary Pages
+-   Container
+-   Unassigned
+-   Ignore
+
+Root-level and nested structures are supported. Missing issue numbers
+are allowed.
+
+Bonus content may exist at both issue and series level.
+
+## Reading
+
+The web reader supports image pages and MP4 media.
+
+Implemented reader/library behavior includes:
+
+-   single-page and vertical reading modes;
+-   fit/fullscreen controls;
+-   keyboard and swipe navigation;
+-   thumbnail navigation;
+-   lazy adjacent loading;
+-   per-user issue reading progress;
+-   Unread / In progress / Finished state;
+-   resume unfinished issues;
+-   finishing on the final page;
+-   Read again for completed issues;
+-   Mark unread on issue pages with existing progress;
+-   recursive series progress aggregation.
+
+Extras do not affect primary issue completion.
+
+## Authentication and security
+
+-   local accounts only;
+-   Argon2 password hashing;
+-   no public signup;
+-   administrator-only import, maintenance, editing, and account
+    management;
+-   CSRF protection on POST actions;
+-   login throttling;
+-   persistent session secret;
+-   session invalidation through `session_version`;
+-   SameSite=Lax cookies;
+-   optional HTTPS-only cookies for production.
+
+## Editing and maintenance
+
+The application supports:
+
+-   author rename;
+-   series and issue editing;
+-   nested series movement/ordering;
+-   extra-group rename/move;
+-   media reorder;
+-   soft media remove/restore;
+-   issue-extra creation;
+-   audit history;
+-   recursive series deletion of managed data;
+-   missing-file/thumbnail checks;
+-   empty-group checks;
+-   incomplete-issue checks;
+-   duplicate-fingerprint checks;
+-   numeric issue-gap reporting and intentional-gap tracking.
+
+Source import folders are not deleted by library editing/deletion
+operations.
+
+## Code layout
+
+The major structural refactor is complete. Important modules are now
+organized roughly as:
+
+``` text
+comic_archive/
+  web.py
+  database.py
+  auth.py
+  library.py
+  library_views.py
+  editing.py
+  maintenance.py
+  progress.py
+  thumbnails.py
+  web_forms.py
+  logging_config.py
+
+  routes/
+    auth.py
+    library.py
+    editing.py
+    maintenance.py
+    media.py
+    import_uploads.py
+    import_review.py
+    import_workspace.py
+    import_finalize.py
+
+  services/
+    diagnostics.py
+    uploads.py
+    import_sessions.py
+    import_orchestration.py
+    workspace.py
+
+  importer/
+    scanner.py
+    models.py
+    review.py
+    staging.py
+    commit.py
+    bulk.py
+    sorting.py
 ```
 
-Commit duplicate protection checks both exact content hashes and matching author/series/issue metadata. To deliberately accept a flagged import:
+`web.py` is now primarily application construction, middleware, state
+initialization, and dependency wiring rather than the implementation
+home for every feature.
 
-```bash
-python -m comic_archive.cli commit ./staging/import.json --library ./library --database ./comic_archive.sqlite3 --allow-duplicate
+## Diagnostics
+
+Application diagnostics and Uvicorn logs (when launched with `comic-import serve`)
+are written to `logs/comic-archive.log` beside the configured database. Commands
+without a database option use `./logs/comic-archive.log` in the working directory.
+
+Override the destination and verbosity with:
+
+``` bash
+comic-import serve --database ./comic_archive.sqlite3 --log-file /var/log/comic-archive/comic-archive.log --log-level INFO
 ```
 
-`--allow-duplicate` does not disable source validation or the guard against committing the exact same staging record twice.
+The service account needs write permission to the log directory. Direct Python
+callers can pass `log_file=` and `log_level=` to `create_app()`. CLI log options
+follow the command name; for `edit`, put them before its nested subcommand.
+Use DEBUG temporarily for investigation; INFO is the default.
 
-## Editing committed imports
+Records include UTC timestamps, severity, logger name, and `CA_DIAG`, plus
+session identifiers where supplied by the operation. Scanner/PDF, uploads,
+workspace, staging, commit and thumbnail messages share the same file.
+CLI command results still print normally to the terminal.
 
-Show IDs needed for command-line edits:
+Files rotate at 10 MiB with five backups (`comic-archive.log.1` through `.5`).
+Copy the current file and any backups covering the import when sharing a run.
+Logs can contain source paths and comic metadata. Errors also go to stderr for
+systemd/journald. If opening, writing or rotating the file fails, logging falls
+back to stderr without aborting application work. A startup open failure uses
+stderr until restart/reconfiguration; runtime write failures are retried on
+subsequent records.
 
-```bash
-python -m comic_archive.cli library --database ./comic_archive.sqlite3 --ids
+Logging is process-wide: the most recently configured application selects the
+destination. This follows the supported single-process deployment. External
+Uvicorn launchers must configure their own server logging; the application
+file configuration still captures Comic Archive messages.
+
+Memory checkpoints include RSS, anonymous/file-backed memory, virtual size and
+thread count where `/proc/self/status` is available. Windows reports these as
+unknown. No logs are served through the web UI.
+
+## Testing
+
+Run the normal test suite with:
+
+``` bash
+python -B -m pytest -q -p no:cacheprovider
 ```
 
-Examples:
+A long-lived TestClient teardown stall has occasionally occurred in the
+development container even against an unchanged baseline. Recent
+milestones therefore also validated the complete suite in independent
+shards rather than treating that environmental stall as an application
+failure.
 
-```bash
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 author AUTHOR_ID --name "Correct Artist"
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 series SERIES_ID --title "Correct Series"
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 issue ISSUE_ID --number "7.5" --title "Special" --complete yes
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 group GROUP_ID --name "Textless"
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 move-extra GROUP_ID --series-id SERIES_ID
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 move-extra GROUP_ID --series-id SERIES_ID --issue-id ISSUE_ID
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 reorder GROUP_ID MEDIA_ID_2 MEDIA_ID_1 MEDIA_ID_3
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 remove-media MEDIA_ID
-python -m comic_archive.cli edit --database ./comic_archive.sqlite3 restore-media MEDIA_ID
+The current complete suite has **201 passing tests** (84 non-web and 117 web).
+One Starlette/httpx deprecation warning remains; no tests are skipped. The original
+Milestone 45 run had 182 tests. Current Windows runs finish without teardown stalls.
+
+For future changes, preserve the pattern of:
+
+1.  targeted tests for the changed subsystem;
+2.  full regression coverage;
+3.  compile check;
+4.  clean package without Python cache artifacts.
+
+Performance changes should add operation-count or behavioral regression
+guards when possible instead of relying only on wall-clock timing.
+
+## Current performance history
+
+Several large-import bottlenecks have already been fixed:
+
+1.  Multipart upload memory growth was replaced with raw request
+    streaming.
+2.  Raw-upload throughput was improved with bounded off-event-loop disk
+    writes, higher browser concurrency, and less-frequent state
+    checkpoints.
+3.  Scanner recursive filesystem/path work was replaced with an indexed
+    single-pass scan.
+4.  Duplicate ownership work during staging was removed.
+5.  Large workspace folder selection was paginated and classification
+    edits stopped forcing immediate global ownership rebuilds.
+6.  Workspace tree construction stopped recursively rewalking the
+    filesystem.
+7.  Ownership resolution was changed from media x nodes to
+    indexed/node-oriented resolution.
+8.  Folder/media membership and automatic ownership are cached for cheap
+    rebuilds and page moves.
+9.  Staging ancestry lookups are precomputed.
+10. JPEG thumbnail generation now performs decoder-level downsampling.
+
+Do not assume the import path is fully optimized. The next large
+real-world import should determine what remains slow.
+
+## Known issues / next work
+
+### Current known UI issue
+
+"Validate and continue to confirmation" can remain disabled after an error until
+refresh. The user reports edits are preserved. Reproducing/fixing this is the
+recommended next development task. Full import cancellation, manual Mark read,
+server-folder UI removal/hiding and an admin import-cleanup panel remain planned;
+see PROJECT_STATUS.md. Browser upload cancellation and issue Mark unread already
+exist, but do not implement all of those broader requests.
+
+### Next performance-validation task
+
+Run a large import using the current build and record where time is spent:
+
+``` text
+upload
+-> scan
+-> workspace
+-> validation/staging
+-> hashing
+-> copying
+-> thumbnailing
+-> finalizing
 ```
 
-Inspect edit history:
-
-```bash
-python -m comic_archive.cli history --database ./comic_archive.sqlite3
-python -m comic_archive.cli history --database ./comic_archive.sqlite3 --entity-id ISSUE_ID
-```
-
-Media removal is soft: the media record becomes inactive and normal library readback hides it, but the copied file is not deleted. It can be restored later.
-
-## Read-only web GUI
-
-Install web dependencies:
-
-```bash
-pip install -e '.[web]'
-```
-
-Run the web library:
-
-```bash
-python -m comic_archive.cli serve --database ./comic_archive.sqlite3 --library ./library
-```
-
-Then open `http://127.0.0.1:8000/` in a browser.
-
-This first GUI is read-only and provides Authors -> Series -> Issues/Extras navigation. Importing, editing, authentication, media serving, thumbnails, and the comic reader are intentionally not exposed through the browser yet.
-
-## Milestone 8: first horizontal reader
-
-Run the web server as before:
-
-```powershell
-python -m comic_archive.cli serve --database ./comic_archive.sqlite3 --library ./library
-```
-
-Open an issue and use **Read issue**. The first reader supports:
-
-- one media item at a time
-- JPEG/PNG/GIF images through the browser's native image support
-- MP4 through the browser's native video player, including audio
-- click left/right side to navigate
-- Left/Right arrow keys
-- Home/End for first/last media item
-- page position in the URL (`?page=N`)
-- media served by database ID rather than directly exposing stored paths
-
-This milestone intentionally does not yet include thumbnails, preloading, vertical mode, reader preferences, or authentication.
-
-
-## Authentication
-
-There is no public account registration.
-
-Before starting the authenticated web app for the first time, create the first administrator from the command line:
-
-```powershell
-python -m comic_archive.cli user-add your-admin-name --admin --database ./comic_archive.sqlite3
-```
-
-You will be prompted for the password without echoing it to the terminal.
-
-Then start the server normally:
-
-```powershell
-python -m comic_archive.cli serve --database ./comic_archive.sqlite3 --library ./library --staging ./staging
-```
-
-When serving through HTTPS (for example through Caddy), add `--secure-cookies` so the session cookie is HTTPS-only:
-
-```powershell
-python -m comic_archive.cli serve --database ./comic_archive.sqlite3 --library ./library --staging ./staging --secure-cookies
-```
-
-After logging in as an administrator, use **Accounts** in the header to create additional admin or regular reader accounts. Regular accounts can browse and read but cannot import, edit, view history, or manage accounts.
-
-
-## Security/account hardening
-
-This milestone adds:
-
-- CSRF protection for every state-changing browser form, including login/logout.
-- User password changes with current-password verification.
-- Administrator password resets.
-- Account enable/disable controls.
-- Administrator/reader role changes.
-- Session-version invalidation so password resets/changes and disabling an account invalidate older sessions.
-- Basic login throttling: five failed attempts for the same username/client combination within five minutes blocks further attempts temporarily.
-- FastAPI docs/OpenAPI routes disabled.
-- `itsdangerous` is now included in the `web` dependency set.
-
-When serving through HTTPS/Caddy, continue to start Comic Archive with `--secure-cookies`.
-
-
-## Thumbnail preview grids
-
-Image thumbnails are derived cache files only; originals are never modified.
-
-New imports generate thumbnails automatically. Existing libraries can be backfilled with:
-
-```powershell
-python -m comic_archive.cli thumbnails-build `
-  --database ./comic_archive.sqlite3 `
-  --library ./library
-```
-
-Still images and the first frame of animated GIFs receive a small JPEG thumbnail. MP4 files are not decoded for thumbnails in this milestone and appear as video placeholders in preview grids.
-
-Issue and extra-content detail pages now show lazy-loaded thumbnail grids. Clicking a thumbnail opens the horizontal reader directly at that page/item.
-
-
-## UI browsing redesign
-
-This milestone changes the visual hierarchy of the library:
-
-- Author pages show series as square, cropped preview cards.
-- Series pages show issues as square, cropped preview cards.
-- Series previews use the first usable image from the first issue.
-- Issue previews use the first usable image from that issue's primary group.
-- Issue pages have one main Read action instead of duplicate primary-group controls.
-- Issue and series extras live in collapsed panels and link to dedicated extra-group pages.
-- Extra-group pages have their own Read action and thumbnail grid.
-- Comic page previews use a fixed width with natural image height/aspect ratio.
-- Grid rows naturally take the height of the tallest preview in that row.
-- Page/item numbers are small corner overlays; filenames are not shown in normal browsing.
-- Admin edit links are visually secondary.
-- Navigation cards use square `object-fit: cover` previews and neutral placeholders when no usable image exists.
-
-
-## Issue editor media access
-
-The issue editor now links directly to the primary comic page editor. From **Edit issue**, administrators can open **Edit comic pages** to reorder pages, remove pages, and restore removed pages. Primary-group edit screens use page-specific labels rather than generic content-group/media wording.
-
-
-## Content regrouping
-
-Administrators can correct grouping mistakes both before and after import.
-
-### After import
-- **Edit issue** can create a new issue-level extra group.
-- **Edit comic pages** and extra-group editors show a Move checkbox for active files.
-- Selected files can be moved between the main comic and any extra group in the same issue.
-- Moving files changes database grouping/order only. Managed media files are not rewritten, deleted, or moved on disk.
-- Source groups are compacted after a move and moved files are appended to the target group.
-- Group creation and media moves are recorded in the audit log.
-
-### During web import
-After metadata, the importer now has an **Organize files** step before confirmation.
-- Create new issue-level extra groups.
-- Assign each individual scanned file to the main comic or any extra group.
-- This works even when extras were mixed into the main issue folder and the scanner could not identify them automatically.
-- Source files remain untouched.
-
-
-## Library search
-
-Authenticated users can search the archive from the header or `/search`.
-
-Search currently covers:
-- author names
-- series titles
-- issue numbers and issue titles
-- extra-group names
-
-Search is case-insensitive and supports partial matches. Results are grouped visually by type and link directly to the matching author, series, issue, or extra group. Original page/media filenames are deliberately not included in normal library search.
-
-
-## Reading progress, status, and modified dates
-
-Reading progress is stored per account and per issue.
-
-- Opening/reading a primary issue records the current page.
-- Issue and series pages show **Unread**, **In progress**, or **Finished**.
-- In-progress issues resume at the saved page when **Continue reading** is used.
-- Reaching the final page marks the issue finished.
-- Finished issues can be read again from page 1.
-- **Mark unread** clears the current user's progress for that issue.
-- The home page shows a **Continue reading** section for the user's recently read unfinished issues.
-- Extra groups do not affect the main issue's reading status.
-- Progress is private to each account.
-
-Issues and series now also have created/updated timestamps. The UI shows the last-modified date on issue pages, series pages, series cards, and issue cards. Changes to issue metadata, content groups, page grouping/order, or active media update the issue and its parent series. Series-level metadata/extras update the series timestamp. Existing databases are migrated automatically; where possible, older timestamps are initialized from import history.
-
-
-## Reader improvements
-
-The reader now supports:
-- **Single page** mode (default).
-- **Vertical scroll** mode for continuous reading.
-- Fit controls: **Fit screen**, **Fit width**, **Fit height**, and **Original size**.
-- Fullscreen mode using the browser Fullscreen API.
-- Touch/swipe page navigation in single-page mode.
-- A collapsible **Pages** thumbnail navigator for jumping directly to a page.
-- Home/End and arrow-key navigation remain available.
-- Reader mode and fit preference are stored locally in the browser and reused next time.
-- In single-page mode, only the current full-resolution image is initially requested. The reader then loads/preloads the current, previous, and next pages as needed rather than eagerly requesting every full-resolution page.
-- Vertical mode loads the issue content and updates reading progress based on the page currently visible.
-- These controls also work when reading extras, except extras continue not to affect the issue's main reading-progress status.
-
-
-## Missing issue awareness and maintenance
-
-Numeric issue gaps are detected automatically within a series. For example, issues 1, 2, 4, and 5 produce a detected gap for issue 3. Non-numeric issue labels and one-shots are ignored by gap detection.
-
-Admins can mark a detected gap as intentionally unavailable and optionally save a note. Intentional gaps remain visible on the series page but are distinguished from unresolved missing issues. They can be reopened later.
-
-The admin-only **Maintenance** page performs read-only library health checks and reports:
-- unresolved and intentional issue-number gaps
-- incomplete issues and issues with unknown completeness
-- active database media whose managed files are missing
-- active image media whose thumbnails are missing
-- empty content groups
-- sets of issues with identical content fingerprints
-
-The dashboard does not delete, move, repair, or rewrite managed library files automatically. Existing thumbnail repair continues to use the `thumbnails-build` command.
-
-
-## Maintenance lock fix
-
-Milestone 19.1 fixes a Windows SQLite `database is locked` error when opening the Maintenance page. The maintenance report now computes per-series issue gaps using the report's existing database connection instead of reopening/reinitializing SQLite once for every series during the scan.
-
-
-## Bulk artist importer
-
-The web importer now has a **Bulk artist import** workflow for an artist folder containing many comics.
-
-- Choose an artist folder on the server machine.
-- The importer discovers immediate child folders that contain supported media.
-- Non-comic child folders with no supported media are ignored.
-- Review the discovered list and select all, none, or any subset.
-- The author defaults to the artist folder name but can be corrected before starting.
-- Each selected comic then goes through the existing review → metadata → organize → confirm workflow independently.
-- The comic folder name is used as the default series title.
-- After a comic commits successfully, the completion page links directly to the next selected comic.
-- The final batch page lists every imported series.
-- Source files remain untouched throughout.
-- Bulk import sessions are kept in memory just like the existing web import sessions, so restarting the server ends an unfinished batch.
-
-The bulk importer intentionally does not auto-commit every discovered folder. This preserves the existing classification, duplicate-warning, organization, and confirmation safeguards for each comic.
-
-## Header menu
-
-Authenticated account/admin actions now live in a compact hamburger menu in the top-right of the header. Search remains directly accessible. Admins see Import, Maintenance, History, and Accounts in the menu; all users see Change password and Log out.
-
-
-## Server import folder browser
-
-The web importer now uses a server-side folder browser instead of asking administrators to type arbitrary filesystem paths.
-
-Run the server with an explicit import root:
-
-```powershell
-python -m comic_archive.cli serve `
-  --database ./comic_archive.sqlite3 `
-  --library ./library `
-  --staging ./staging `
-  --import-root "G:\Comics\Incoming"
-```
-
-When deployed to a server, `--import-root` should point at the directory (or mounted volume) containing material available for import, for example `/srv/comic-imports`. The browser is restricted to that root and rejects attempts to navigate outside it.
-
-Both normal and bulk artist importers use the same browser. The web UI stores and submits paths relative to the configured import root rather than exposing arbitrary server paths.
-
-For direct Python `create_app(...)` use, if `import_root` is omitted it defaults to the database file's parent directory for backward compatibility. The CLI defaults `--import-root` to the current directory, but an explicit import root is recommended.
-
-Single-comic imports now name their primary content group after the comic folder instead of `Primary content`. This makes the default review name match the source comic name while remaining editable during review.
-
-
-## Browser folder uploads
-
-The primary web-import workflow is now designed for a remote Comic Archive server that does **not** already have access to the user's source files.
-
-### Normal import
-
-Open **Import** and choose a comic folder from the computer running the web browser. The browser uploads the selected folder tree to the server, preserving relative paths. Comic Archive writes that upload into an isolated temporary directory under:
-
-```text
-<staging>/uploads/<upload-id>/content/
-```
-
-The existing scanner, review, metadata, file-organization, duplicate-check, and commit pipeline then runs against that temporary copy.
-
-A successful single-comic commit removes its temporary upload directory. The original files on the user's computer are never modified, moved, renamed, or deleted.
-
-### Bulk artist import
-
-Open **Bulk artist import** and choose the artist folder from the browser's computer. The entire selected directory tree is uploaded once. Comic Archive discovers comic folders beneath the uploaded artist folder and then processes selected comics sequentially through the existing per-comic review workflow.
-
-The shared temporary artist upload remains available while the batch is being processed and is removed after the final selected comic is successfully committed.
-
-### Upload implementation
-
-The folder picker uses the browser directory-selection capability and JavaScript submits each file using its relative path so the server can reconstruct the folder hierarchy.
-
-Uploaded files are copied to staging in 1 MiB chunks. Starlette's multipart parser is configured to accept up to 100,000 file parts for large artist collections. `python-multipart` is now part of the `web` dependency set.
-
-After updating, reinstall the web dependencies:
-
-```powershell
-pip install -e '.[web]'
-```
-
-### Optional server-side import
-
-The previous server-folder browser has not been removed. It is now a secondary admin option under **Import a folder already on the server**. `--import-root` controls the filesystem area exposed to that optional browser.
-
-It is not needed for normal remote ingestion. A deployed server can have an empty source filesystem and still ingest folders chosen from an administrator's local computer through the web interface.
-
-### Deployment note
-
-Large browser uploads can take significant time and bandwidth. When Comic Archive is later placed behind Caddy or another reverse proxy, proxy request/body/time-out settings should be checked so they do not prematurely terminate large collection uploads.
-
-
-## Import upload cleanup and bulk skip
-
-Temporary browser uploads now expire after **12 hours of import inactivity**.
-
-Meaningful import activity refreshes the inactivity clock, including upload creation, bulk selection/progression, review changes, metadata submission, organization changes, duplicate-confirmation attempts, and skipping to the next bulk comic. Merely viewing an import page does not keep an abandoned upload alive.
-
-Comic Archive performs an opportunistic stale-upload sweep during web requests, no more than once per hour. Active in-memory imports are removed when expired, their temporary upload directories are deleted, and orphaned directories under `staging/uploads` are also deleted when their modification time is older than 12 hours. This orphan sweep means old upload data is still cleaned after a server restart even though in-memory import sessions do not survive the restart.
-
-Accessing a specific import session after its 12-hour inactivity limit also triggers immediate expiration/cleanup rather than extending it.
-
-Bulk imports now support **Skip this comic and continue** on the confirmation page, including when duplicate detection blocks the current comic. Skipping:
-
-- does not commit the current comic,
-- removes its staging JSON if one exists,
-- keeps the shared bulk upload available,
-- advances directly to the next selected comic,
-- records the skipped comic in the final bulk summary,
-- and removes the shared upload when the last selected comic is either committed or skipped.
-
-The skip action is available only inside a bulk import; normal single-comic imports cannot use it.
-
-
-### Orphaned staging JSON cleanup
-
-The 12-hour importer cleanup also removes stale top-level `staging/*.json` records that are no longer referenced by any active import session. Active staging JSON files are explicitly protected from the orphan sweep even if their file modification time is old.
-
-This complements the existing cleanup of `staging/uploads/*`, so both abandoned uploaded media and abandoned staging metadata are reclaimed after the inactivity window.
-
-
-## Resumable per-file browser uploads
-
-The primary browser importer now uses an upload-session protocol instead of sending an entire selected folder in one multipart request.
-
-Flow:
-
-1. The browser creates an upload session with the selected file count and import mode (`single` or `bulk`).
-2. Files are uploaded individually while preserving each `webkitRelativePath`.
-3. The browser runs up to **3 file uploads concurrently**.
-4. A failed file is retried automatically up to **3 attempts** with short exponential backoff.
-5. Successfully received relative paths are idempotent within the server upload session, so retrying the same completed file does not increase the received count or create a duplicate.
-6. If some files still fail after automatic retries, the UI changes to **Resume upload**. Retrying sends only the files that have not completed in that browser session.
-7. Finalization is rejected until the server has received exactly the expected number of files.
-8. Finalization hands the completed temporary directory to the existing scan/review/metadata/organize/confirm/commit pipeline.
-9. A **Cancel upload** action removes the unfinished upload session and its temporary directory.
-
-Upload-session activity participates in the existing 12-hour inactivity cleanup. Unfinished upload sessions that go idle expire and are removed; the orphan directory sweep remains the fallback after a server restart.
-
-This is file-level resumability, not byte-range resumability inside one file. If a single file fails halfway through, that file is retransmitted from the beginning, but already completed files in the folder do not need to be resent.
-
-The previous whole-folder `/import/upload` and `/import/bulk/upload` endpoints remain for backward compatibility, but the normal web interface no longer uses them.
-
-For reverse-proxy deployment, request-body limits now generally need to accommodate the **largest individual file** being imported rather than an entire artist folder in one request.
-
-## Milestone 22.1 — production login CSRF fix
-
-Fixed a production-only login failure exposed by browser background requests such as `/favicon.ico`. Anonymous requests to protected paths now preserve the existing session CSRF token instead of clearing the session and generating a new token while the login form is open. Invalid/stale authenticated sessions still have authentication state cleared, but their existing CSRF token is preserved when possible. `/favicon.ico` now returns HTTP 204 without entering the authentication redirect flow. Regression coverage includes secure cookies over an HTTPS TestClient, favicon access between login GET and POST, and anonymous protected requests preserving the login CSRF token.
-
-
-## Milestone 23 improvements
-
-- Author series cards now list the primary page count for every issue.
-- Series have independent completeness metadata: Unknown, Complete, or Incomplete. It can be set during web import, in the series editor, or with `edit series --complete`.
-- Active import/review pages send a CSRF-protected keepalive every two minutes while visible, and normal importer page navigation also refreshes activity. The existing 12-hour cleanup now applies to genuinely inactive sessions. Server process restarts still clear in-memory import sessions.
-- Extra-like folders nested beneath neutral page/container directories are preserved as extras instead of being flattened into primary comic pages.
-- Organizer Create/Remove group actions first save all current file-to-group selections, so their page reload no longer discards pending moves.
-- The organizer blocks continuation when any content group is empty, identifies the empty group, and allows empty extra groups to be removed. Commit validation also rejects empty groups as a final safeguard.
-
-## Milestone 23.1 — Series card summaries
-
-Author-page series cards now show a compact five-line summary: series title, issue count, series completeness, modified date, and aggregate page/extra counts. Page totals sum active media in primary groups across all issues. Extra totals sum active media in issue-level extra groups plus series-level extra groups.
-
-## Milestone 23.2 — nested issue extras detection
-- Series issue folders now preserve distinct child content folders instead of silently flattening them into the issue's primary pages when the issue already has direct page files.
-- Extra-like folders such as `issue 1/extras/` are always staged as issue-level extra groups.
-- Conventional primary page containers such as `Pages/`, `Images/`, `Main/`, and `Primary/` still fold into the main comic.
-- Existing one-shot import behavior remains unchanged for arbitrary nested page folders.
-- Added regression coverage for multi-issue series with nested extras and end-to-end staging preservation.
-
-### PDF import
-
-PDF files are accepted as importer input. Each PDF page is rendered at 150 DPI to an ordered PNG (`0001.png`, `0002.png`, ...), then follows the normal image import path. The source PDF is never modified. Rendered temporary pages are cleaned with their web import session, while the managed library stores ordinary PNG files. PDF rendering uses PyMuPDF, included in the `web` optional dependencies.
-
-## Milestone 25 — Manual issue ordering
-
-- Issues now have a persistent per-series `sort_order`.
-- Existing databases automatically preserve their previous displayed issue order during migration.
-- Import metadata includes an Order field for every issue; the chosen relative order is preserved on commit.
-- Existing series can be reordered from the Edit series page using numeric order fields. Values are normalized on save.
-- Series pages and issue-selection helpers consistently use the stored manual order before legacy label/title fallback.
-- Reordering is audited and updates modified timestamps.
-
-## Milestone 26: pre-flatten folder classification
-
-The web import review now exposes media-bearing folders that are currently included in primary content but were not recognized as extras. Admins can click **Mark folder as extras** before staging. The importer rescans the untouched source with an explicit extra-folder override, preserving that folder as a real extra group instead of requiring page-by-page regrouping later.
-
-This works for one-shot comics and for folders nested inside detected series issues, including structures such as `Issue A/Pages/...` plus `Issue A/Gallery/...` where `Gallery` is bonus material but has no recognized extra keyword.
-
-## Milestone 27 — nested series and hierarchy-aware import review
-
-Series can now contain child series recursively. The `series` table gains nullable
-`parent_series_id` and `sort_order` columns; existing databases migrate automatically
-and existing flat series remain top-level.
-
-During import review, an issue-like folder can be promoted to **Make sub-series**
-before staging. The source is rescanned without modifying it, and that folder's child
-folders become reviewable issues or can themselves be promoted again for deeper
-nesting. Folders shown in the pre-flatten section can also be marked as a sub-series.
-Nested series names are editable during review, and the metadata screen supports
-nested-series completeness and ordering.
-
-Example:
-
-```text
-Comic/
-  Volume 1/
-    Arc A/
-      Chapter 1/
-      Chapter 2/
-    Arc B/
-      Chapter 3/
-```
-
-`Volume 1`, `Arc A`, and `Arc B` can all be marked as sub-series, producing a recursive
-series tree. Issues and series-level extras are committed to the series node that owns
-them. Managed media storage remains unchanged: media still lives under the ID of the
-series/content group that owns it.
-
-The author page displays top-level series cards with recursively aggregated issue,
-page, and extra totals. Parent modified dates also reflect descendant changes. Series
-pages show child-series cards before direct issues and breadcrumbs reflect the nested
-path. Existing series can be moved under another series or returned to top level from
-**Edit series**; cycle creation is rejected.
-
-## Milestone 28: tree-based import workspace
-
-The import review step now opens a file-explorer-style workspace built from the uploaded comic's real folder tree. Folder files stay collapsed in the tree; selecting a folder shows its scanned/imported pages in a right-hand pane.
-
-Workspace controls:
-
-- Every media-bearing folder is visible before staging, including folders the scanner would otherwise fold into primary pages.
-- Folders display an import role: Series, Sub-Series, Issue, Issue-Extras, Series-Extras, Primary Pages, or Container.
-- Non-root roles can be changed directly in the tree. Role changes rescan the untouched temporary source rather than modifying files.
-- Sibling folders can be dragged up/down. That order becomes the default sub-series/issue order on the metadata step.
-- Pages in the selected folder/group can be dragged to set reading order; the order is carried into staging and commit.
-- PDF imports continue to show their rendered PNG pages in the page-order pane.
-- Existing review endpoints remain available internally for compatibility, while `/import/<session>/review` now presents the workspace.
-
-Current workspace scope is intentionally conservative: folder drag-and-drop reorders siblings but does not yet reparent folders, and moving pages between content groups still uses the existing organizer step. Those are natural follow-ups as the workspace absorbs more of the importer flow.
-
-## Milestone 29 — single-page import workspace
-
-Importing is now centered on one tree-based workspace instead of separate Review, Metadata, and Organize pages.
-
-- Workspace folder ordering now uses the importer's natural numeric sort, so `1, 2, 3, 10, 11` displays correctly instead of `1, 10, 11, 2, 3`.
-- Author, series title, and series completeness live at the top of the workspace.
-- Selecting an Issue exposes issue label/title/completeness in the right pane.
-- Selecting a Sub-Series exposes its editable title and completeness.
-- Selecting an Issue-Extras or Series-Extras folder exposes its editable group name.
-- Folder drag order remains the source of issue/sub-series ordering; the old numeric Order fields are no longer needed in the normal workflow.
-- Issue extra groups can be created directly from an Issue in the workspace. Workspace-created groups appear in the tree and can be renamed or removed before import.
-- Pages can be reassigned between the main comic and issue-extra groups from the selected-folder pane, while drag-and-drop continues to set reading order.
-- The workspace final action validates structure, metadata, empty groups, and page assignments, then creates the staging record and goes directly to confirmation.
-- The final button saves the currently visible metadata before validation, so users do not need to remember a separate save action first.
-- Existing legacy metadata/organizer endpoints remain in the code for compatibility, but the standard import UI no longer routes through them.
-
-## Milestone 30 — autosave and drag-to-group workspace
-
-- Workspace metadata saves automatically after edits; explicit metadata save buttons are no longer required.
-- Text inputs debounce saves; selects/blur save immediately, with visible Saving/Saved/error status.
-- Pending metadata is flushed before folder navigation, group creation/removal, drag moves, and final validation.
-- The narrow per-page destination dropdown has been removed from the workspace.
-- Pages can be selected by click, Ctrl/Cmd-click, or Shift-click.
-- A selected page set can be dragged from the right-hand page list onto compatible issue/main or issue-extra folders in the left tree.
-- Multi-page moves are validated server-side and cannot cross into unrelated issues.
-- Existing single-page drag sorting remains available.
-
-## Milestone 31 — recoverable import sessions
-
-Import and bulk-import workspace state is persisted under `staging/session_state/` and can be reconstructed after an application restart or loss of in-memory state while the source upload still exists. Persisted state includes workspace metadata, folder-role/order overrides, virtual extra groups, page assignments, staged confirmation data, and bulk progress. Activity updates both the state record and upload-root mtime. Temporary upload data is removed only after successful import, explicit cancellation/finished bulk cleanup, or 12 hours of genuine inactivity.
-
-## Milestone 32 — card presentation cleanup
-
-- Author cards now use thumbnails from the first available comic/series preview.
-- Series and sub-series cards show aggregate reading status (Unread / In progress / Finished).
-- Completion is shown as a neutral pill only when explicitly Complete or Incomplete; unknown is hidden.
-- Modified dates are smaller/dimmer secondary metadata.
-- Series/sub-series omit `+ 0 extras` when no extras exist.
-- Issue cards no longer prefix issue labels with the word `Issue`; pages, extras, and modified date use separate lines.
-- Issue cards show extra item counts only when extras exist.
-- Series pages with sub-series but no direct issues no longer show an empty Issues section.
-
-Synthetic issue/sub-series creation in the import workspace is intentionally deferred to the next importer milestone because it requires staged page-ownership changes beyond the existing virtual extra-group model.
-
-## Milestone 33 — resilient import actions
-
-- Commit is idempotent at the web layer: repeated/double POSTs redirect to the same completed receipt instead of attempting a second import.
-- Successful imports use POST -> Redirect -> GET, making refresh and browser back/forward navigation safe.
-- Completion receipts persist for 12 hours under staging/session_state and contain no source media; temporary uploaded media is still deleted after successful import.
-- If a commit reached SQLite but the response/receipt was lost, the web layer can recover the committed staging record from the imports table.
-- Confirmation and workspace validation forms visibly enter a processing state and disable repeated submit clicks.
-- The commit processing display uses an indeterminate progress bar because the current synchronous commit operation cannot truthfully report byte-level progress while it is running.
-- Browser back/forward cache restores submit controls via the pageshow event.
-
-
-## Milestone 34 additions
-
-- Admins can permanently delete a series tree from Edit series after typing its exact title. Managed pages, extras, thumbnails, descendant sub-series/issues, and import references are removed; original external source files are untouched.
-- The import workspace can create logical issues and nested series/sub-series without changing the uploaded source tree. Pages can be dragged into these synthetic issues before staging. Empty synthetic issues are rejected at validation.
-- Bulk artist discovery includes root-level PDF files as individual comic candidates. They are wrapped only in temporary staging storage for scanning/rendering, leaving source PDFs untouched. Multiple numbered root PDFs can be imported sequentially into the same series by assigning the same series title and distinct issue labels in the workspace.
-
-## Milestone 35 — virtual filesystem import workspace
-
-The import workspace now treats the scanned source as a starting point rather than an immutable structure. The upload root and folders can be reclassified without rescanning, generic virtual folders can be created and then assigned a role, folders can be dragged into other folders or reordered among siblings, and selected files can be moved freely into compatible Issue / Primary Pages / Issue Extras / Series Extras destinations. Workspace-created folders and source folders are only logical import structure; source files are never moved or modified.
-
-Supported workspace roles now include Series, Sub-Series, Issue, Issue-Extras, Series-Extras, Primary Pages, Container, Unassigned, and Ignore. The physical upload root can be Series, Issue/one-shot, Container, or Ignore. Folder labels and semantic metadata autosave. A virtual folder starts Unassigned and can be dragged/reclassified later. Drag order is the persisted issue/sub-series order.
-
-Files can be ignored individually during import and restored before commit. Setting a whole folder/node to Ignore excludes its descendant import content. Validation blocks files left in non-semantic Container/Unassigned locations and points out that they need a destination or Ignore state.
-
-Scanner hardening added two default guesses: a folder containing multiple PDFs and no other supported media seeds one issue candidate per PDF, and a series containing multiple issue-like child folders plus only loose cover/promo-style media keeps the child folders as issues and places the loose media into Series extras instead of flattening the import.
-
-## Milestone 36 — virtual-tree staging + live import progress
-
-- Fixes virtual-tree staging flattening nested semantic folders back into their ancestor issue.
-  - `one-shot issue/textless` remains Issue Extras when assigned that role.
-  - sibling `with text` Primary Pages and `without text` Issue Extras remain separate.
-  - staging now prefers the deepest matching semantic virtual-tree node for each source media file.
-- Bulk `Skip this comic and continue` now uses the same submit-lock/processing UI as Commit.
-- Commit now runs off the ASGI event loop and publishes live progress state.
-- Confirmation polls `/import/<session>/commit-progress` while the POST is processing.
-- Progress reports meaningful phases: validation, database preparation, hashing/duplicate checking, copying, thumbnail generation, finalization, complete.
-- Copy/thumbnail phases include current filename and file-count progress.
-- This makes unusually long imports diagnosable: the UI shows whether time is being spent hashing, copying, or generating thumbnails.
-- Full suite: 158 tests passed.
-
-## Milestone 37 — workspace visual consistency fixes
-
-- Workspace file/page pane now uses the same deepest-semantic-node ownership rules as staging, so pages assigned to nested Primary Pages or Extras folders are no longer also displayed under the parent Issue.
-- Tree counts now show effective imported page/media counts instead of physical source-file counts. Rendered PDF pages therefore count individually, and overlapping scanner groups do not inflate ancestor counts.
-- Fixed a drag/reparent race where `dragend` cleared the active DOM node before the asynchronous move completed, causing `Cannot read properties of null` after moving newly-created folders.
-- Added regressions for nested extras visual ownership, PDF rendered-page counts, and the drag/reparent race.
-- Full test suite: 161 passed.
-
-## Milestone 38 — virtual workspace cache
-
-- Folder navigation no longer rebuilds effective media ownership for the whole comic on every click.
-- The importer builds one in-memory virtual workspace index containing the logical tree, a folder-to-media-ID map, and a media-ID-to-record map.
-- Normal workspace reads (tree rendering, right-hand page view, effective counts, and destination choices) reuse that cache directly and do not traverse source directories.
-- A cheap signature over logical workspace state invalidates the cache only when structure actually changes: role/parent changes, file moves, ignore state, virtual folders, names, or ordering.
-- Media reordering explicitly invalidates the cache because its order lives on the scanned media records rather than in the logical workspace dictionaries.
-- Removed the duplicate media-target calculation from the review route.
-- Added regression tests proving repeated folder reads do not invoke the filesystem-backed workspace builder, while a logical edit triggers exactly one rebuild.
-- Full test suite: 163 passed.
-
-## Milestone 39 hotfix
-- Fixed seeded PDF issue pages becoming unassigned after metadata/folder-label edits triggered a virtual-cache rebuild.
-- Scanner-seeded logical PDF issue nodes now retain ownership of their rendered pages.
-- Added regression coverage for renaming/renumbering PDF issues.
-- Test suite: 164 passed.
-
-## Milestone 41 — streaming uploads and indexed scans
-
-The primary resumable browser uploader now sends each file as a raw request body and streams it directly to disk instead of parsing the file through multipart form handling. This keeps upload memory bounded, validates the declared file size, preserves restart-safe upload sessions, and reports both byte and file-count progress.
-
-Folder scans now build a single filesystem/media index and perform subsequent structure classification from that index rather than recursively re-walking media-bearing subtrees. Browser-upload finalization performs scan work outside the ASGI event loop and exposes scan status to the upload page while it runs.
-
-Server logs now report upload counts/bytes/RSS, scan phases and timings, indexed file/folder counts, PDF-render progress, and detailed upload failures to make production diagnostics substantially easier.
+If possible, capture `CA_DIAG` output during the run.
+
+Do not optimize a phase merely because it looks theoretically expensive;
+use the production run to identify the next dominant cost.
+
+### Known architectural follow-ups
+
+Potential future work includes:
+
+-   targeted database/library queries instead of reading large portions
+    of the hierarchy for some pages;
+-   SQLite indexing/query review after measuring real library scale;
+-   reducing the large dependency-wiring section in `create_app()` if it
+    becomes cumbersome;
+-   removing or formally deprecating old CLI/legacy multipart paths when
+    no longer needed;
+-   reviewing restored-session rescanning behavior for very large
+    sources;
+-   reviewing bulk discovery separately from normal single-folder
+    scanning;
+-   considering carefully bounded thumbnail parallelism only if commit
+    CPU remains dominant and memory measurements show adequate headroom.
+
+Avoid aggressive thumbnail parallelism until memory behavior is measured
+on a large real import.
+
+## Important invariants for future development
+
+Please preserve these unless a deliberate product decision changes them:
+
+-   Source files are not modified, moved, or deleted by import.
+-   PDF input is rendered to PNG; normal image originals are preserved.
+-   Issues and sub-series may coexist under the same series.
+-   Missing issue numbers are valid.
+-   Series-level and issue-level bonus content are both valid.
+-   Explicit workspace media assignments override automatic ownership.
+-   Import/recovery actions should remain idempotent where possible.
+-   Browser uploads should remain restart-safe.
+-   The app is private/default-deny; import/edit/maintenance actions are
+    admin-only.
+-   Reading progress is per user.
+-   Extras do not determine issue completion.
+-   Performance fixes should not silently change
+    classification/ownership semantics.
+
+## Packaging and standalone handoff
+
+Include AGENTS.md, ARCHITECTURE.md, PROJECT_STATUS.md, DECISIONS.md, README.md,
+TODO.md, source/templates, tests, pyproject.toml and .gitignore in a complete source
+ZIP. Include new/untracked files, especially logging_config.py and test_logging.py.
+The old convention of excluding Markdown from milestone update ZIPs must not be
+used for a complete handoff. Exclude databases/accounts/session secrets, runtime
+library/staging/uploads, logs, caches, virtual environments and private .env files.
+
+This checkpoint has uncommitted work. Package the working tree, not only HEAD;
+`git archive HEAD` would omit current changes. No ZIP is generated automatically.
+
+To continue in a new conversation, read the five permanent documents, inspect the
+relevant source/tests, install the declared web/dev extras in your environment,
+and reproduce the regression baseline. PROJECT_STATUS.md contains the complete
+outstanding requests and open choices, including those also listed in TODO.md.
+Do not assume a source handoff implies a production deployment or authorize
+large real imports or destructive cleanup without the user's task scope.

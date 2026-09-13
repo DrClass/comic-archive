@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import sqlite3
+import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 
 
 THUMBNAIL_MAX_SIZE = (320, 480)
 THUMBNAIL_QUALITY = 78
 THUMBNAIL_MIME = "image/jpeg"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -38,6 +41,7 @@ def create_thumbnail(
 
     source = Path(source_path)
     destination = Path(destination)
+    temporary: Path | None = None
     try:
         with Image.open(source) as image:
             # For animated images, Pillow starts on frame 0. We intentionally
@@ -70,16 +74,33 @@ def create_thumbnail(
                 output = image.convert("RGB")
 
             destination.parent.mkdir(parents=True, exist_ok=True)
-            output.save(
-                destination,
-                format="JPEG",
-                quality=THUMBNAIL_QUALITY,
-                optimize=True,
-                progressive=True,
-            )
+            # Publish only a complete derivative. A unique sibling file keeps
+            # replacement atomic and concurrent requests from sharing a temp.
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, prefix=f".{destination.name}.",
+                suffix=".tmp", delete=False,
+            ) as target:
+                temporary = Path(target.name)
+                output.save(
+                    target,
+                    format="JPEG",
+                    quality=THUMBNAIL_QUALITY,
+                    optimize=True,
+                    progressive=True,
+                )
+            temporary.replace(destination)
         return True
-    except (UnidentifiedImageError, OSError, ValueError):
+    except Exception:
+        # Derivative failures must not abort imports or a rebuild batch.
+        # Process-control exceptions still propagate through the finally block.
+        logger.warning("Thumbnail generation failed source=%s destination=%s", source, destination, exc_info=True)
         return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Thumbnail temporary file cleanup failed path=%s", temporary, exc_info=True)
 
 
 def ensure_thumbnail(

@@ -17,7 +17,7 @@ def test_single_issue_review_contains_primary_and_issue_extras(tmp_path: Path) -
 
     plan = build_review_plan(scan_folder(tmp_path))
 
-    assert [(str(item.relative_path), item.role) for item in plan.items] == [
+    assert [(item.relative_path.as_posix(), item.role) for item in plan.items] == [
         (".", ReviewRole.PRIMARY),
         ("Covers", ReviewRole.ISSUE_EXTRA),
     ]
@@ -45,7 +45,7 @@ def test_series_review_separates_issue_and_series_extras(tmp_path: Path) -> None
 
     plan = build_review_plan(scan_folder(tmp_path))
 
-    roles = {str(item.relative_path): item.role for item in plan.items}
+    roles = {item.relative_path.as_posix(): item.role for item in plan.items}
     assert roles == {
         "1": ReviewRole.ISSUE,
         "1/Extra Angles": ReviewRole.ISSUE_EXTRA,
@@ -95,7 +95,7 @@ def test_review_keeps_named_extra_groups_separate(tmp_path: Path) -> None:
     plan = build_review_plan(scan_folder(tmp_path))
 
     extras = [item for item in plan.items if item.role is ReviewRole.ISSUE_EXTRA]
-    assert [(item.name, str(item.relative_path)) for item in extras] == [
+    assert [(item.name, item.relative_path.as_posix()) for item in extras] == [
         ("Extra Angles", "Extra Angles"),
         ("Textless", "Textless"),
     ]
@@ -122,10 +122,10 @@ def test_review_exposes_unrecognized_flattened_folder_before_staging(tmp_path: P
 
     scan = scan_folder(tmp_path)
     assert scan.primary is not None
-    assert "Alternate Artwork/a.png" in [str(media.relative_path) for media in scan.primary.media]
+    assert "Alternate Artwork/a.png" in [media.relative_path.as_posix() for media in scan.primary.media]
 
     candidates = flattened_folder_candidates(scan)
-    assert [(str(item.display_path), item.media_count) for item in candidates] == [
+    assert [(item.display_path.as_posix(), item.media_count) for item in candidates] == [
         ("Alternate Artwork", 2),
     ]
 
@@ -133,7 +133,7 @@ def test_review_exposes_unrecognized_flattened_folder_before_staging(tmp_path: P
     plan = build_review_plan(rescanned)
     assert plan.find("Alternate Artwork").role is ReviewRole.ISSUE_EXTRA
     assert rescanned.primary is not None
-    assert [str(media.relative_path) for media in rescanned.primary.media] == ["001.jpg"]
+    assert [media.relative_path.as_posix() for media in rescanned.primary.media] == ["001.jpg"]
 
 
 def test_series_review_exposes_unrecognized_issue_subfolder_before_staging(tmp_path: Path) -> None:
@@ -145,9 +145,9 @@ def test_series_review_exposes_unrecognized_issue_subfolder_before_staging(tmp_p
 
     scan = scan_folder(tmp_path)
     candidates = flattened_folder_candidates(scan)
-    assert any(str(item.display_path) == "Issue A/Gallery" for item in candidates)
+    assert any(item.display_path.as_posix() == "Issue A/Gallery" for item in candidates)
 
-    chosen = next(item for item in candidates if str(item.display_path) == "Issue A/Gallery")
+    chosen = next(item for item in candidates if item.display_path.as_posix() == "Issue A/Gallery")
     rescanned = scan_folder(tmp_path, extra_folders=[str(chosen.relative_path)])
     plan = build_review_plan(rescanned)
     assert plan.find("Issue A/Gallery").role is ReviewRole.ISSUE_EXTRA

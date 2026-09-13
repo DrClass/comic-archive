@@ -8,18 +8,6 @@ from pathlib import Path
 logger = logging.getLogger("comic_archive.web")
 
 
-def configure_diagnostic_logging() -> None:
-    """Ensure importer diagnostics always reach stderr/journald at INFO."""
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    if not any(getattr(handler, "_comic_archive_diag", False) for handler in logger.handlers):
-        handler = logging.StreamHandler()
-        handler._comic_archive_diag = True  # type: ignore[attr-defined]
-        handler.setLevel(logging.INFO)
-        handler.setFormatter(logging.Formatter("CA_DIAG %(message)s"))
-        logger.addHandler(handler)
-
-
 def process_memory_snapshot() -> dict[str, float | int | None]:
     values: dict[str, float | int | None] = {
         "rss_mib": None,
