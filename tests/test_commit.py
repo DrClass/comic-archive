@@ -217,7 +217,7 @@ def test_duplicate_detection_backfills_previous_milestone_rows(tmp_path: Path) -
         commit_staged_import(new_stage, **kwargs)
 
 
-def test_pdf_pages_commit_as_png_files(tmp_path):
+def test_pdf_pages_commit_as_jpeg_files(tmp_path):
     import fitz
 
     source = tmp_path / "source"
@@ -241,6 +241,10 @@ def test_pdf_pages_commit_as_png_files(tmp_path):
         database_path=tmp_path / "archive.sqlite3",
     )
 
-    stored = sorted((library / "series" / result.series_id / "groups").rglob("*.png"))
+    stored = sorted(
+        path for path in (library / "series" / result.series_id / "groups").rglob("*.jpg")
+        if path.parent.name != "_thumbs"
+    )
     assert len(stored) == 2
-    assert all(path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for path in stored)
+    assert [path.name for path in stored] == ["000001.jpg", "000002.jpg"]
+    assert all(path.read_bytes().startswith(b"\xff\xd8") for path in stored)

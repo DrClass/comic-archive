@@ -277,7 +277,7 @@ def test_pages_container_still_folds_into_primary(tmp_path: Path) -> None:
     assert [(group.name, len(group.media)) for group in result.extras] == [("Extras", 1)]
 
 
-def test_pdf_is_expanded_into_ordered_png_pages(tmp_path):
+def test_pdf_is_expanded_into_ordered_jpeg_pages(tmp_path):
     import fitz
 
     source = tmp_path / "PDF Comic"
@@ -295,13 +295,13 @@ def test_pdf_is_expanded_into_ordered_png_pages(tmp_path):
 
     assert result.primary is not None
     assert len(result.primary.media) == 3
-    assert [item.mime_type for item in result.primary.media] == ["image/png"] * 3
+    assert [item.mime_type for item in result.primary.media] == ["image/jpeg"] * 3
     assert [item.relative_path.as_posix() for item in result.primary.media] == [
-        "comic_pdf_pages/0001.png",
-        "comic_pdf_pages/0002.png",
-        "comic_pdf_pages/0003.png",
+        "comic_pdf_pages/0001.jpg",
+        "comic_pdf_pages/0002.jpg",
+        "comic_pdf_pages/0003.jpg",
     ]
-    assert all(item.path.suffix == ".png" and item.path.is_file() for item in result.primary.media)
+    assert all(item.path.suffix == ".jpg" and item.path.is_file() for item in result.primary.media)
     assert Path(pdf_path).read_bytes().startswith(b"%PDF")
 
 
@@ -390,7 +390,7 @@ def test_pdf_inside_issue_with_extras_stays_primary_and_extras_stay_separate(tmp
     first = next(issue for issue in result.issues if issue.name == "Issue 1")
     assert first.primary is not None
     assert len(first.primary.media) == 2
-    assert all(item.mime_type == "image/png" for item in first.primary.media)
+    assert all(item.mime_type == "image/jpeg" for item in first.primary.media)
     assert len(first.extras) == 1
     assert first.extras[0].name == "Extras"
     assert len(first.extras[0].media) == 1

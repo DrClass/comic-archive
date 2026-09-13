@@ -28,12 +28,15 @@ SUPPORTED_MEDIA: dict[str, tuple[MediaKind, str]] = {
     ".png": (MediaKind.IMAGE, "image/png"),
     ".gif": (MediaKind.IMAGE, "image/gif"),
     ".mp4": (MediaKind.VIDEO, "video/mp4"),
-    # PDF is an accepted importer input. It is expanded into PNG pages by
+    # PDF is an accepted importer input. It is expanded into high-quality JPEG pages by
     # _scan_media and is never committed to the library as a PDF.
     ".pdf": (MediaKind.IMAGE, "application/pdf"),
 }
 
 IGNORED_FILENAMES = {"thumbs.db", ".ds_store", "desktop.ini"}
+
+PDF_RENDER_DPI = 150
+PDF_JPEG_QUALITY = 98
 
 # These are suggestions only. The future import-review UI will always allow
 # the user to override them.
@@ -305,7 +308,10 @@ def _render_pdf_pages(
         raise FolderScanError("PDF import requires PyMuPDF. Reinstall with the web/import dependencies.") from exc
 
     fingerprint = hashlib.sha256(
-        f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{pdf_path.stat().st_mtime_ns}".encode("utf-8")
+        (
+            f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{pdf_path.stat().st_mtime_ns}"
+            f"|dpi={PDF_RENDER_DPI}|format=jpg|quality={PDF_JPEG_QUALITY}"
+        ).encode("utf-8")
     ).hexdigest()[:20]
     output_dir = pdf_cache_root / fingerprint
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -339,7 +345,7 @@ def _render_pdf_pages(
 
             for page_index in range(page_count):
                 page_number = page_index + 1
-                name = f"{page_number:0{width}d}.png"
+                name = f"{page_number:0{width}d}.jpg"
                 destination = output_dir / name
                 page_started = time.monotonic()
                 if destination.is_file():
@@ -350,11 +356,11 @@ def _render_pdf_pages(
                     total_load_seconds += time.monotonic() - load_started
 
                     raster_started = time.monotonic()
-                    pixmap = page.get_pixmap(dpi=150, alpha=False)
+                    pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI, alpha=False)
                     total_raster_seconds += time.monotonic() - raster_started
 
                     save_started = time.monotonic()
-                    pixmap.save(destination)
+                    pixmap.save(destination, output="jpg", jpg_quality=PDF_JPEG_QUALITY)
                     total_save_seconds += time.monotonic() - save_started
                     rendered_pages += 1
 
@@ -365,7 +371,7 @@ def _render_pdf_pages(
                     slowest_page = page_number
                     slowest_page_seconds = page_elapsed
 
-                rendered.append((destination, display_dir / name, MediaKind.IMAGE, "image/png"))
+                rendered.append((destination, display_dir / name, MediaKind.IMAGE, "image/jpeg"))
                 if progress:
                     progress("rendering_pdf", page_number, page_count, f"Rendering PDF: {pdf_path.name}")
                 if page_number % 25 == 0 or page_number == page_count:

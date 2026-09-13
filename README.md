@@ -150,7 +150,7 @@ The scanner accepts:
 -   `.mp4`
 -   `.pdf`
 
-PDF is an importer input format only. PDF pages are rendered to PNG for
+PDF is an importer input format only. PDF pages are rendered to high-quality JPEG for
 the managed library; the source PDF is not modified.
 
 The importer does not currently require CBZ support and does not convert
@@ -492,7 +492,7 @@ on a large real import.
 Please preserve these unless a deliberate product decision changes them:
 
 -   Source files are not modified, moved, or deleted by import.
--   PDF input is rendered to PNG; normal image originals are preserved.
+-   PDF input is rendered to high-quality JPEG; normal image originals are preserved.
 -   Issues and sub-series may coexist under the same series.
 -   Missing issue numbers are valid.
 -   Series-level and issue-level bonus content are both valid.
