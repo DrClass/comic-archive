@@ -29,7 +29,7 @@ TODO.md mirrors the outstanding requests, which are also recorded below.
   series and individual issue deletion with admin/CSRF/confirmation checks, and maintenance reports for gaps,
   missing files/thumbnails, empty groups, incomplete issues and duplicates.
 - Server-folder import and browser folder upload, bulk artist import, JPG/JPEG/
-  PNG/GIF/MP4/PDF input, PDF-to-JPEG rendering, editable virtual workspace, synthetic
+  PNG/GIF/MP4/PDF input, direct PDF image extraction with JPEG-render fallback, editable virtual workspace, synthetic
   nodes, reparent/order/target/ignore operations, validation and staged commit.
 - Raw streamed uploads with restart recovery, periodic checkpoints, 16 GiB/file,
   4 MiB write buffer, browser concurrency six, and an upload-session cancel route.

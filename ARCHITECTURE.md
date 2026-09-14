@@ -113,13 +113,13 @@ Thumbnails: JPEG, max 320x480, quality 78; transparent images composite onto whi
 
 ## Supported import media
 
-Scanner extensions: `.jpg`, `.jpeg`, `.png`, `.gif`, `.mp4`, `.pdf`. Images/video map to media kinds. PDF is input-only: PyMuPDF renders pages to high-quality JPEG; the PDF itself is not committed as reader media. Source originals are untouched.
+Scanner extensions: `.jpg`, `.jpeg`, `.png`, `.gif`, `.mp4`, `.pdf`. Images/video map to media kinds. PDF is input-only: simple single-image pages can directly preserve embedded JPEG/PNG data when the image exactly represents the visible page; other pages are rendered by PyMuPDF to high-quality JPEG. The PDF itself is not committed as reader media. Source originals are untouched.
 
 ## Scanner
 
 `importer/scanner.py` uses an indexed filesystem pass with `os.scandir`/cached metadata rather than repeated recursive discovery. Downstream code should consume the scan model instead of walking the filesystem again. Scanner emits progress and diagnostic logging.
 
-Multiple loose PDFs at a series root can seed one logical issue per PDF. PDF cache identity uses source path/stat information.
+Multiple loose PDFs at a series root can seed one logical issue per PDF. PDF cache identity uses source path/stat information plus the active extraction/render policy. Direct extraction is deliberately conservative: one unrotated full-page image, no mask, overlays, drawings, annotations, widgets, or crop/rotation transforms; unsupported/ambiguous pages fall back to rendering.
 
 ## Review and workspace
 

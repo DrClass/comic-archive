@@ -56,7 +56,7 @@ Service responsibilities: `workspace.py` tree/ownership/cache/media/staged-build
 
 - Source files are read-only. Never move/rename/rewrite/delete them during import.
 - Managed library content is copied under ID-based storage.
-- JPG/JPEG/PNG/GIF/MP4 originals are not converted. PDF input is rendered to high-quality JPEG pages; source PDF remains untouched.
+- JPG/JPEG/PNG/GIF/MP4 originals are not converted. Simple image-only PDF pages directly preserve embedded JPEG/PNG data when safe; other PDF pages render to high-quality JPEG. Source PDFs remain untouched.
 - Series can contain **both direct issues and child sub-series**.
 - Missing/non-contiguous issue numbers are valid.
 - Extras exist at both series and issue level.

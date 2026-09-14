@@ -28,8 +28,8 @@ SUPPORTED_MEDIA: dict[str, tuple[MediaKind, str]] = {
     ".png": (MediaKind.IMAGE, "image/png"),
     ".gif": (MediaKind.IMAGE, "image/gif"),
     ".mp4": (MediaKind.VIDEO, "video/mp4"),
-    # PDF is an accepted importer input. It is expanded into high-quality JPEG pages by
-    # _scan_media and is never committed to the library as a PDF.
+    # PDF is an accepted importer input. Safe single-image pages preserve embedded
+    # JPEG/PNG data; other pages render to high-quality JPEG. PDFs are never committed.
     ".pdf": (MediaKind.IMAGE, "application/pdf"),
 }
 
@@ -37,6 +37,12 @@ IGNORED_FILENAMES = {"thumbs.db", ".ds_store", "desktop.ini"}
 
 PDF_RENDER_DPI = 150
 PDF_JPEG_QUALITY = 98
+PDF_CACHE_VERSION = 2
+PDF_DIRECT_IMAGE_TYPES: dict[str, tuple[str, str]] = {
+    "jpeg": (".jpg", "image/jpeg"),
+    "jpg": (".jpg", "image/jpeg"),
+    "png": (".png", "image/png"),
+}
 
 # These are suggestions only. The future import-review UI will always allow
 # the user to override them.
@@ -296,6 +302,63 @@ def _find_content_root(
         current = media_children[0]
 
 
+def _rects_close(first, second, *, tolerance: float = 0.01) -> bool:
+    return all(abs(float(a) - float(b)) <= tolerance for a, b in zip(first, second))
+
+
+def _direct_pdf_image(page, document) -> tuple[bytes, str, str] | None:
+    """Return a lossless direct page-image extraction when visual equivalence is clear.
+
+    This intentionally accepts only the simple comic-PDF case: one unrotated,
+    unmasked RGB/grayscale raster covering the complete uncropped page, with no
+    text, vector drawings, annotations, or widgets layered over it. Anything
+    ambiguous falls back to normal page rendering.
+    """
+    if page.rotation != 0 or not _rects_close(page.cropbox, page.mediabox):
+        return None
+    if page.first_annot is not None or page.first_widget is not None:
+        return None
+    if page.get_text("text").strip() or page.get_drawings():
+        return None
+
+    images = page.get_image_info(xrefs=True)
+    if len(images) != 1:
+        return None
+    info = images[0]
+    if not info.get("xref") or info.get("has-mask"):
+        return None
+    if info.get("bpc") != 8 or info.get("colorspace") not in {1, 3}:
+        return None
+    if not _rects_close(info["bbox"], page.rect):
+        return None
+
+    # A matching bounding box alone is not sufficient: a PDF may rotate or
+    # mirror the underlying image into that box. Direct extraction must preserve
+    # the same orientation the page renderer would show.
+    a, b, c, d, e, f = (float(value) for value in info["transform"])
+    if abs(b) > 0.01 or abs(c) > 0.01 or a <= 0 or d <= 0 or abs(e) > 0.01 or abs(f) > 0.01:
+        return None
+    if abs(a - page.rect.width) > 0.01 or abs(d - page.rect.height) > 0.01:
+        return None
+
+    extracted = document.extract_image(int(info["xref"]))
+    image_type = str(extracted.get("ext", "")).casefold()
+    output = PDF_DIRECT_IMAGE_TYPES.get(image_type)
+    image = extracted.get("image")
+    if output is None or not isinstance(image, (bytes, bytearray)) or not image:
+        return None
+    suffix, mime_type = output
+    return bytes(image), suffix, mime_type
+
+
+def _cached_pdf_page(output_dir: Path, stem: str) -> tuple[Path, str] | None:
+    for suffix, mime_type in ((".jpg", "image/jpeg"), (".png", "image/png")):
+        destination = output_dir / f"{stem}{suffix}"
+        if destination.is_file():
+            return destination, mime_type
+    return None
+
+
 def _render_pdf_pages(
     pdf_path: Path,
     relative_to: Path,
@@ -310,7 +373,7 @@ def _render_pdf_pages(
     fingerprint = hashlib.sha256(
         (
             f"{pdf_path.resolve()}|{pdf_path.stat().st_size}|{pdf_path.stat().st_mtime_ns}"
-            f"|dpi={PDF_RENDER_DPI}|format=jpg|quality={PDF_JPEG_QUALITY}"
+            f"|cache={PDF_CACHE_VERSION}|dpi={PDF_RENDER_DPI}|format=jpg|quality={PDF_JPEG_QUALITY}|direct=jpeg,png"
         ).encode("utf-8")
     ).hexdigest()[:20]
     output_dir = pdf_cache_root / fingerprint
@@ -331,13 +394,15 @@ def _render_pdf_pages(
                 pdf_path, page_count, pdf_path.stat().st_size, open_elapsed,
             )
             if progress:
-                progress("rendering_pdf", 0, page_count, f"Rendering PDF: {pdf_path.name}")
+                progress("rendering_pdf", 0, page_count, f"Processing PDF: {pdf_path.name}")
 
             width = max(4, len(str(page_count)))
             cached_pages = 0
+            extracted_pages = 0
             rendered_pages = 0
             output_bytes = 0
             total_load_seconds = 0.0
+            total_extract_seconds = 0.0
             total_raster_seconds = 0.0
             total_save_seconds = 0.0
             slowest_page = 0
@@ -345,24 +410,38 @@ def _render_pdf_pages(
 
             for page_index in range(page_count):
                 page_number = page_index + 1
-                name = f"{page_number:0{width}d}.jpg"
-                destination = output_dir / name
+                stem = f"{page_number:0{width}d}"
                 page_started = time.monotonic()
-                if destination.is_file():
+                cached = _cached_pdf_page(output_dir, stem)
+                if cached is not None:
+                    destination, mime_type = cached
                     cached_pages += 1
                 else:
                     load_started = time.monotonic()
                     page = document.load_page(page_index)
                     total_load_seconds += time.monotonic() - load_started
 
-                    raster_started = time.monotonic()
-                    pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI, alpha=False)
-                    total_raster_seconds += time.monotonic() - raster_started
+                    extract_started = time.monotonic()
+                    direct = _direct_pdf_image(page, document)
+                    total_extract_seconds += time.monotonic() - extract_started
+                    if direct is not None:
+                        image_bytes, suffix, mime_type = direct
+                        destination = output_dir / f"{stem}{suffix}"
+                        save_started = time.monotonic()
+                        destination.write_bytes(image_bytes)
+                        total_save_seconds += time.monotonic() - save_started
+                        extracted_pages += 1
+                    else:
+                        destination = output_dir / f"{stem}.jpg"
+                        mime_type = "image/jpeg"
+                        raster_started = time.monotonic()
+                        pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI, alpha=False)
+                        total_raster_seconds += time.monotonic() - raster_started
 
-                    save_started = time.monotonic()
-                    pixmap.save(destination, output="jpg", jpg_quality=PDF_JPEG_QUALITY)
-                    total_save_seconds += time.monotonic() - save_started
-                    rendered_pages += 1
+                        save_started = time.monotonic()
+                        pixmap.save(destination, output="jpg", jpg_quality=PDF_JPEG_QUALITY)
+                        total_save_seconds += time.monotonic() - save_started
+                        rendered_pages += 1
 
                 page_bytes = destination.stat().st_size
                 output_bytes += page_bytes
@@ -371,23 +450,24 @@ def _render_pdf_pages(
                     slowest_page = page_number
                     slowest_page_seconds = page_elapsed
 
-                rendered.append((destination, display_dir / name, MediaKind.IMAGE, "image/jpeg"))
+                rendered.append((destination, display_dir / destination.name, MediaKind.IMAGE, mime_type))
                 if progress:
-                    progress("rendering_pdf", page_number, page_count, f"Rendering PDF: {pdf_path.name}")
+                    progress("rendering_pdf", page_number, page_count, f"Processing PDF: {pdf_path.name}")
                 if page_number % 25 == 0 or page_number == page_count:
                     logger.info(
-                        "pdf render progress file=%s page=%d/%d rendered=%d cached=%d output_bytes=%d elapsed=%.2fs",
-                        pdf_path, page_number, page_count, rendered_pages, cached_pages, output_bytes,
-                        time.monotonic() - render_started,
+                        "pdf render progress file=%s page=%d/%d extracted=%d rendered=%d cached=%d "
+                        "output_bytes=%d elapsed=%.2fs",
+                        pdf_path, page_number, page_count, extracted_pages, rendered_pages, cached_pages,
+                        output_bytes, time.monotonic() - render_started,
                     )
 
             elapsed = time.monotonic() - render_started
             logger.info(
-                "pdf render complete file=%s pages=%d rendered=%d cached=%d output_bytes=%d "
-                "open_elapsed=%.3fs load_elapsed=%.3fs raster_elapsed=%.3fs save_elapsed=%.3fs "
-                "total_elapsed=%.3fs slowest_page=%d slowest_page_elapsed=%.3fs",
-                pdf_path, page_count, rendered_pages, cached_pages, output_bytes, open_elapsed,
-                total_load_seconds, total_raster_seconds, total_save_seconds, elapsed,
+                "pdf render complete file=%s pages=%d extracted=%d rendered=%d cached=%d output_bytes=%d "
+                "open_elapsed=%.3fs load_elapsed=%.3fs extract_elapsed=%.3fs raster_elapsed=%.3fs "
+                "save_elapsed=%.3fs total_elapsed=%.3fs slowest_page=%d slowest_page_elapsed=%.3fs",
+                pdf_path, page_count, extracted_pages, rendered_pages, cached_pages, output_bytes, open_elapsed,
+                total_load_seconds, total_extract_seconds, total_raster_seconds, total_save_seconds, elapsed,
                 slowest_page, slowest_page_seconds,
             )
     except FolderScanError:

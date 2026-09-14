@@ -305,6 +305,129 @@ def test_pdf_is_expanded_into_ordered_jpeg_pages(tmp_path):
     assert Path(pdf_path).read_bytes().startswith(b"%PDF")
 
 
+def test_pdf_directly_extracts_single_full_page_jpeg_without_reencoding(tmp_path, caplog):
+    fitz = pytest.importorskip("fitz")
+    image_module = pytest.importorskip("PIL.Image")
+    source = tmp_path / "Direct JPEG Comic"
+    source.mkdir()
+    original = source / "original.jpg"
+    image_module.new("RGB", (900, 1200), (80, 120, 160)).save(original, format="JPEG", quality=91)
+    original_bytes = original.read_bytes()
+
+    pdf_path = source / "comic.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=900, height=1200)
+    page.insert_image(page.rect, filename=str(original))
+    doc.save(pdf_path)
+    doc.close()
+    original.unlink()
+
+    caplog.set_level("INFO", logger="comic_archive.scanner")
+    result = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+
+    assert result.primary is not None
+    assert len(result.primary.media) == 1
+    media = result.primary.media[0]
+    assert media.mime_type == "image/jpeg"
+    assert media.relative_path.as_posix() == "comic_pdf_pages/0001.jpg"
+    assert media.path.read_bytes() == original_bytes
+    summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
+    assert "extracted=1" in summary
+    assert "rendered=0" in summary
+
+
+def test_pdf_direct_extraction_cache_reuses_original_extension(tmp_path, caplog):
+    fitz = pytest.importorskip("fitz")
+    image_module = pytest.importorskip("PIL.Image")
+    source = tmp_path / "Direct Cache Comic"
+    source.mkdir()
+    original = source / "original.png"
+    image_module.new("RGB", (400, 600), (25, 50, 75)).save(original, format="PNG")
+
+    pdf_path = source / "comic.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=600)
+    page.insert_image(page.rect, filename=str(original))
+    doc.save(pdf_path)
+    doc.close()
+    original.unlink()
+    cache = tmp_path / "pdf-cache"
+
+    first = scan_folder(source, pdf_cache_root=cache)
+    assert first.primary is not None
+    assert first.primary.media[0].path.suffix == ".png"
+
+    caplog.clear()
+    caplog.set_level("INFO", logger="comic_archive.scanner")
+    second = scan_folder(source, pdf_cache_root=cache)
+
+    assert second.primary is not None
+    assert second.primary.media[0].path.suffix == ".png"
+    summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
+    assert "extracted=0" in summary
+    assert "rendered=0" in summary
+    assert "cached=1" in summary
+
+
+def test_pdf_page_with_text_overlay_falls_back_to_rendered_jpeg(tmp_path, caplog):
+    fitz = pytest.importorskip("fitz")
+    image_module = pytest.importorskip("PIL.Image")
+    source = tmp_path / "Overlay Comic"
+    source.mkdir()
+    original = source / "original.png"
+    image_module.new("RGB", (600, 800), (40, 80, 120)).save(original, format="PNG")
+
+    pdf_path = source / "overlay.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_image(page.rect, filename=str(original))
+    page.insert_text((30, 50), "PDF overlay must be preserved")
+    doc.save(pdf_path)
+    doc.close()
+    original.unlink()
+
+    caplog.set_level("INFO", logger="comic_archive.scanner")
+    result = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+
+    assert result.primary is not None
+    media = result.primary.media[0]
+    assert media.mime_type == "image/jpeg"
+    assert media.relative_path.as_posix() == "overlay_pdf_pages/0001.jpg"
+    assert media.path.read_bytes().startswith(b"\xff\xd8\xff")
+    summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
+    assert "extracted=0" in summary
+    assert "rendered=1" in summary
+
+
+def test_pdf_directly_extracts_single_full_page_png_and_preserves_type(tmp_path, caplog):
+    fitz = pytest.importorskip("fitz")
+    image_module = pytest.importorskip("PIL.Image")
+    source = tmp_path / "Direct PNG Comic"
+    source.mkdir()
+    original = source / "original.png"
+    image_module.new("RGB", (500, 700), (10, 20, 30)).save(original, format="PNG")
+
+    pdf_path = source / "comic.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=500, height=700)
+    page.insert_image(page.rect, filename=str(original))
+    doc.save(pdf_path)
+    doc.close()
+    original.unlink()
+
+    caplog.set_level("INFO", logger="comic_archive.scanner")
+    result = scan_folder(source, pdf_cache_root=tmp_path / "pdf-cache")
+
+    assert result.primary is not None
+    media = result.primary.media[0]
+    assert media.mime_type == "image/png"
+    assert media.relative_path.as_posix() == "comic_pdf_pages/0001.png"
+    assert media.path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
+    assert "extracted=1" in summary
+    assert "rendered=0" in summary
+
+
 def test_pdf_render_reports_page_progress_and_timing_summary(tmp_path, caplog):
     fitz = pytest.importorskip("fitz")
     source = tmp_path / "PDF Progress Comic"
@@ -326,13 +449,15 @@ def test_pdf_render_reports_page_progress_and_timing_summary(tmp_path, caplog):
 
     pdf_events = [event for event in events if event[0] == "rendering_pdf"]
     assert [(event[1], event[2]) for event in pdf_events] == [(0, 3), (1, 3), (2, 3), (3, 3)]
-    assert all(event[3] == "Rendering PDF: progress.pdf" for event in pdf_events)
+    assert all(event[3] == "Processing PDF: progress.pdf" for event in pdf_events)
 
     summary = next(record.getMessage() for record in caplog.records if "pdf render complete" in record.getMessage())
     assert "pages=3" in summary
+    assert "extracted=0" in summary
     assert "rendered=3" in summary
     assert "cached=0" in summary
     assert "load_elapsed=" in summary
+    assert "extract_elapsed=" in summary
     assert "raster_elapsed=" in summary
     assert "save_elapsed=" in summary
     assert "output_bytes=" in summary

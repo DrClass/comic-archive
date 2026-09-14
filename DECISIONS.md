@@ -6,7 +6,7 @@
 
 3. **Managed storage is normalized and ID-based.** `library/series/<series-id>/groups/<group-id>/000001.ext` decouples logical metadata from unreliable source layout.
 
-4. **Preserve original media formats except PDF.** JPG/JPEG/PNG/GIF/MP4 are copied; PDF is rendered to PNG pages. General conversion is not desired. CBZ is not currently required.
+4. **Preserve original media formats, including safe PDF-contained page images.** JPG/JPEG/PNG/GIF/MP4 are copied. Simple image-only PDF pages directly preserve embedded JPEG/PNG data when safe; other PDF pages render to high-quality JPEG. General conversion is not desired. CBZ is not currently required.
 
 5. **Extras exist at issue and series level.** Database ownership supports both.
 
