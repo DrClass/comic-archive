@@ -154,6 +154,11 @@ PDF is an importer input format only. For simple image-only pages, the importer 
 extracts embedded JPEG/PNG data without re-encoding when visual equivalence is safe.
 Other PDF pages are rendered to high-quality JPEG. The source PDF is not modified.
 
+PDF fallback rendering and JPEG saving use at most two worker processes per PDF,
+with at most two page jobs in flight. Direct extraction remains sequential; fully
+cached and direct-extraction-only PDFs start no workers. Rendering retains 150 DPI
+and JPEG quality 98. No new dependency, configuration, or cache migration is needed.
+
 The importer does not currently require CBZ support and does not convert
 normal image originals.
 

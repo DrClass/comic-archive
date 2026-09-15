@@ -1,5 +1,45 @@
 # PROJECT_STATUS.md — Comic Archive Current Handoff
 
+## PDF fallback multiprocessing update (2026-09-15)
+
+Authoritative baseline: the latest `comic-archive-main.zip` attached to the
+PDF Performance conversation (archive entries dated 2026-09-14), including the
+existing direct JPEG/PNG extraction fast path.
+
+- Added a lazy two-process pool for fallback render plus JPEG-save work only,
+  with explicit spawn and at most two page jobs in flight per PDF scan.
+- Direct extraction eligibility and implementation, cache fingerprint/version,
+  page order, 150 DPI, quality 98, progress messages, diagnostic fields, original
+  source immutability, and non-PDF handling are preserved.
+- Fallback workers publish JPEGs atomically; all exit paths wait for workers
+  before returning to import cleanup. No migration or additional dependency.
+- Added ten tests for scheduling, output equivalence, cache reuse, failures,
+  cleanup, source preservation, non-PDF handling, and real spawned execution.
+
+Validation on Windows/Python 3.10 in the Codex filesystem sandbox:
+
+- Baseline PDF tests before editing: **9 passed**.
+- Focused new tests excluding actual spawn: **9 passed, 1 deselected**.
+- Full normal suite: **208 passed, 12 failed, 1 warning**, 29.90 seconds.
+  All twelve failures originate from Windows denying Python multiprocessing's
+  local named-pipe access (`WinError 5` in `multiprocessing.connection.Pipe`),
+  including downstream web responses after that error. The permission tool
+  could not represent the pipe namespace. Real process execution is unverified;
+  this is not a clean full-suite pass.
+- Supplemental full integration run substituting the controlled executor test
+  double from `tests/test_pdf_workers.py`: **219 passed, 1 deselected, 1 warning**,
+  32.30 seconds. This runs real rendering/saving sequentially behind a simulated
+  out-of-order completion scheduler; it does not prove multiprocessing startup,
+  concurrency, or speedup. Only the explicit spawned-worker test was deselected.
+- All **48 Python files** passed in-memory compilation. Direct extraction and
+  cache lookup helpers were checked against the uploaded baseline and unchanged.
+
+Before production use, rerun `python -B -m pytest -q -p no:cacheprovider` outside
+the restricted sandbox, then measure a real PDF import. No parallel performance
+benchmark or production deployment was possible in this environment. The existing
+Starlette/httpx deprecation warning remains. Earlier checkpoint sections below
+are historical; their test counts predate this PDF work.
+
 ## Current checkpoint (2026-09-13)
 
 **Milestone 45 plus completed post-handoff maintenance.** There is no new numbered

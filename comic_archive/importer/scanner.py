@@ -7,6 +7,10 @@ import hashlib
 import logging
 import os
 import time
+import multiprocessing
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Callable
 from pathlib import Path
@@ -36,6 +40,7 @@ SUPPORTED_MEDIA: dict[str, tuple[MediaKind, str]] = {
 IGNORED_FILENAMES = {"thumbs.db", ".ds_store", "desktop.ini"}
 
 PDF_RENDER_DPI = 150
+PDF_RENDER_WORKERS = 2
 PDF_JPEG_QUALITY = 98
 PDF_CACHE_VERSION = 2
 PDF_DIRECT_IMAGE_TYPES: dict[str, tuple[str, str]] = {
@@ -359,6 +364,104 @@ def _cached_pdf_page(output_dir: Path, stem: str) -> tuple[Path, str] | None:
     return None
 
 
+@dataclass
+class _PDFPageResult:
+    destination: Path
+    mime_type: str
+    mode: str
+    load_seconds: float = 0.0
+    extract_seconds: float = 0.0
+    raster_seconds: float = 0.0
+    save_seconds: float = 0.0
+    elapsed: float = 0.0
+
+
+def _render_pdf_page(pdf_path: Path, page_index: int, destination: Path) -> _PDFPageResult:
+    """Spawn-safe worker: only paths/numbers cross the process boundary."""
+    import fitz
+
+    started = time.monotonic()
+    result = _PDFPageResult(destination, "image/jpeg", "rendered")
+    # Open independently for each job, bounding retained MuPDF caches as well as
+    # pixmaps. Never inherit the caller's document or rotating log handlers.
+    with fitz.open(pdf_path) as document:
+        page = document.load_page(page_index)
+        result.load_seconds = time.monotonic() - started
+        raster_started = time.monotonic()
+        pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI, alpha=False)
+        result.raster_seconds = time.monotonic() - raster_started
+        save_started = time.monotonic()
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=".part", delete=False) as handle:
+                temporary = Path(handle.name)
+            pixmap.save(temporary, output="jpg", jpg_quality=PDF_JPEG_QUALITY)
+            temporary.replace(destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        result.save_seconds = time.monotonic() - save_started
+    result.elapsed = time.monotonic() - started
+    return result
+
+
+def _pdf_page_results(document, pdf_path: Path, output_dir: Path, stack: ExitStack):
+    """Prepare sequentially, with a bounded ordered window of fallback jobs."""
+    width = max(4, len(str(document.page_count)))
+    pending: deque[tuple[_PDFPageResult, Future | None]] = deque()
+    pool = None
+
+    def completed():
+        result, future = pending.popleft()
+        if future is not None:
+            worker = future.result()
+            result.load_seconds += worker.load_seconds
+            result.raster_seconds = worker.raster_seconds
+            result.save_seconds = worker.save_seconds
+            # Sum actual page work, excluding queue/wait time and other pages.
+            result.elapsed += worker.elapsed
+        return result
+
+    for page_index in range(document.page_count):
+        started = time.monotonic()
+        stem = f"{page_index + 1:0{width}d}"
+        cached = _cached_pdf_page(output_dir, stem)
+        future = None
+        if cached is not None:
+            result = _PDFPageResult(*cached, "cached")
+        else:
+            load_started = time.monotonic()
+            page = document.load_page(page_index)
+            load_seconds = time.monotonic() - load_started
+            extract_started = time.monotonic()
+            direct = _direct_pdf_image(page, document)
+            extract_seconds = time.monotonic() - extract_started
+            if direct is not None:
+                image_bytes, suffix, mime_type = direct
+                destination = output_dir / f"{stem}{suffix}"
+                save_started = time.monotonic()
+                destination.write_bytes(image_bytes)
+                result = _PDFPageResult(destination, mime_type, "extracted",
+                                        save_seconds=time.monotonic() - save_started)
+            else:
+                result = _PDFPageResult(output_dir / f"{stem}.jpg", "image/jpeg", "rendered")
+                if pool is None:
+                    # Explicit spawn is safe even when invoked by the web app's
+                    # background thread; fork would inherit live native state.
+                    pool = ProcessPoolExecutor(max_workers=PDF_RENDER_WORKERS,
+                                               mp_context=multiprocessing.get_context("spawn"))
+                    stack.callback(pool.shutdown, wait=True, cancel_futures=True)
+                future = pool.submit(_render_pdf_page, pdf_path, page_index, result.destination)
+            result.load_seconds = load_seconds
+            result.extract_seconds = extract_seconds
+        result.elapsed = time.monotonic() - started
+        pending.append((result, future))
+        if len(pending) >= PDF_RENDER_WORKERS:
+            yield completed()
+    while pending:
+        yield completed()
+
+
 def _render_pdf_pages(
     pdf_path: Path,
     relative_to: Path,
@@ -383,7 +486,7 @@ def _render_pdf_pages(
     rendered: list[tuple[Path, Path, MediaKind, str]] = []
     open_started = time.monotonic()
     try:
-        with fitz.open(pdf_path) as document:
+        with fitz.open(pdf_path) as document, ExitStack() as workers:
             open_elapsed = time.monotonic() - open_started
             if document.page_count < 1:
                 raise FolderScanError(f"PDF has no pages: {pdf_path}")
@@ -396,7 +499,6 @@ def _render_pdf_pages(
             if progress:
                 progress("rendering_pdf", 0, page_count, f"Processing PDF: {pdf_path.name}")
 
-            width = max(4, len(str(page_count)))
             cached_pages = 0
             extracted_pages = 0
             rendered_pages = 0
@@ -408,44 +510,18 @@ def _render_pdf_pages(
             slowest_page = 0
             slowest_page_seconds = 0.0
 
-            for page_index in range(page_count):
-                page_number = page_index + 1
-                stem = f"{page_number:0{width}d}"
-                page_started = time.monotonic()
-                cached = _cached_pdf_page(output_dir, stem)
-                if cached is not None:
-                    destination, mime_type = cached
-                    cached_pages += 1
-                else:
-                    load_started = time.monotonic()
-                    page = document.load_page(page_index)
-                    total_load_seconds += time.monotonic() - load_started
-
-                    extract_started = time.monotonic()
-                    direct = _direct_pdf_image(page, document)
-                    total_extract_seconds += time.monotonic() - extract_started
-                    if direct is not None:
-                        image_bytes, suffix, mime_type = direct
-                        destination = output_dir / f"{stem}{suffix}"
-                        save_started = time.monotonic()
-                        destination.write_bytes(image_bytes)
-                        total_save_seconds += time.monotonic() - save_started
-                        extracted_pages += 1
-                    else:
-                        destination = output_dir / f"{stem}.jpg"
-                        mime_type = "image/jpeg"
-                        raster_started = time.monotonic()
-                        pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI, alpha=False)
-                        total_raster_seconds += time.monotonic() - raster_started
-
-                        save_started = time.monotonic()
-                        pixmap.save(destination, output="jpg", jpg_quality=PDF_JPEG_QUALITY)
-                        total_save_seconds += time.monotonic() - save_started
-                        rendered_pages += 1
-
+            for page_number, result in enumerate(_pdf_page_results(document, pdf_path, output_dir, workers), 1):
+                destination, mime_type = result.destination, result.mime_type
+                cached_pages += result.mode == "cached"
+                extracted_pages += result.mode == "extracted"
+                rendered_pages += result.mode == "rendered"
+                total_load_seconds += result.load_seconds
+                total_extract_seconds += result.extract_seconds
+                total_raster_seconds += result.raster_seconds
+                total_save_seconds += result.save_seconds
                 page_bytes = destination.stat().st_size
                 output_bytes += page_bytes
-                page_elapsed = time.monotonic() - page_started
+                page_elapsed = result.elapsed
                 if page_elapsed > slowest_page_seconds:
                     slowest_page = page_number
                     slowest_page_seconds = page_elapsed

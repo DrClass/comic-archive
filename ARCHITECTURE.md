@@ -195,6 +195,26 @@ Import families: `/import`, `/import/browse`, `/import/scan`, `/import/upload`, 
 
 ## Concurrency/diagnostics
 
+PDF fallback pages use a lazily created `ProcessPoolExecutor` with a maximum of
+two workers and explicit `spawn`, including when scanning from a web background
+thread. Cache checks and direct embedded-image extraction stay sequential in the
+caller. An ordered two-page window bounds submissions and preserves page names,
+result ordering, and per-page progress callbacks. Each render job independently
+opens/closes the source PDF, rasterizes at 150 DPI, and atomically publishes a
+quality-98 JPEG from a unique sibling temporary file. Native documents/pixmaps
+never cross processes. Pool shutdown waits for running jobs and cancels unstarted
+jobs on every exit, before caller cleanup can remove temporary import storage.
+
+Workers return timing data; the caller retains all existing PDF log fields and
+progress messages. `load_elapsed` includes worker document open/page loads;
+`raster_elapsed` and `save_elapsed` sum work across processes and can therefore
+overlap in wall time. `slowest_page_elapsed` sums that page's preparation and worker
+work, excluding queue/result waiting; `total_elapsed` remains wall time for page
+processing. The cache fingerprint/version and direct extraction eligibility are
+unchanged. Startup/render failures retain the `FolderScanError` path; there is no
+silent serial retry. The two-worker limit is per active PDF scan, not a server-wide
+concurrent-import scheduler.
+
 Long scan/staging work uses a custom daemon-thread/future bridge in `services/diagnostics.py`; it was chosen because long threadpool work caused pytest TestClient teardown hangs. Commit uses `asyncio.to_thread`; not all background work uses the custom bridge. SQLite remains synchronous. `logging_config.py` configures process-wide rotating file logging for application messages and CLI-launched Uvicorn. The default is `logs/comic-archive.log` beside the database, with 10 MiB rotation and five backups. `create_app(log_file=..., log_level=...)` and CLI `--log-file`/`--log-level` override it. UTC timestamps, severity, logger names, `CA_DIAG`, and available memory checkpoints are retained. Errors also reach stderr; file failures fall back to stderr without aborting work.
 
 ## Deployment boundary
