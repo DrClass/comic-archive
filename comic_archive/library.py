@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .database import connect_database
+from .permissions import AccessPolicy
 
 
 @dataclass(slots=True)
@@ -99,10 +100,12 @@ def _bool_or_none(value: int | None) -> bool | None:
     return None if value is None else bool(value)
 
 
-def read_library(database_path: str | Path) -> list[AuthorView]:
+def read_library(database_path: str | Path, *, access: AccessPolicy | None = None) -> list[AuthorView]:
     with connect_database(database_path, row_factory=True) as db:
         authors: list[AuthorView] = []
         for author_row in db.execute("SELECT id, name FROM authors ORDER BY name COLLATE NOCASE"):
+            if access is not None and not access.author(author_row["id"]):
+                continue
             author = AuthorView(id=author_row["id"], name=author_row["name"])
             by_id: dict[str, SeriesView] = {}
             ordered: list[SeriesView] = []
@@ -112,6 +115,8 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
                    ORDER BY COALESCE(sort_order, 2147483647), title COLLATE NOCASE""",
                 (author.id,),
             ):
+                if access is not None and not access.series(series_row["id"]):
+                    continue
                 series = SeriesView(
                     id=series_row["id"], title=series_row["title"],
                     complete=_bool_or_none(series_row["complete"]), updated_at=series_row["updated_at"],
@@ -123,6 +128,8 @@ def read_library(database_path: str | Path) -> list[AuthorView]:
                        ORDER BY COALESCE(sort_order, 2147483647), COALESCE(issue_number, title, source_key) COLLATE NOCASE""",
                     (series.id,),
                 ):
+                    if access is not None and not access.issue(issue_row["id"]):
+                        continue
                     issue = IssueView(
                         id=issue_row["id"], issue_number=issue_row["issue_number"], title=issue_row["title"],
                         complete=_bool_or_none(issue_row["complete"]), sort_order=issue_row["sort_order"],

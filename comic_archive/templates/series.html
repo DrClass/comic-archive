@@ -9,7 +9,7 @@
     <p class="card-badges">{% if series.complete is sameas true %}<span class="reading-status completion-status">Complete</span>{% elif series.complete is sameas false %}<span class="reading-status completion-status">Incomplete</span>{% endif %}</p>
     {% if series.effective_updated_at %}<p class="card-modified">Modified {{ series.effective_updated_at[:10] }}</p>{% endif %}
   </div>
-  {% if request.state.user.is_admin %}<a class="admin-link" href="/series/{{ series.id }}/edit">Edit series</a>{% endif %}
+  {% if request.state.user.is_admin %}<a class="admin-link" href="/series/{{ series.id }}/edit">Edit series</a> <a class="admin-link" href="/admin/permissions/series/{{ series.id }}">Permissions</a>{% endif %}
 </div>
 
 {% if series.children %}

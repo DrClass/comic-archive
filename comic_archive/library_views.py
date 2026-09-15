@@ -5,6 +5,7 @@ from typing import Iterable
 
 from .database import connect_database
 from .library import AuthorView, GroupView, IssueView, MediaView, SeriesView
+from .permissions import AccessPolicy
 
 
 def find_author(authors: Iterable[AuthorView], author_id: str) -> AuthorView | None:
@@ -142,7 +143,7 @@ def series_lineage(author: AuthorView, series: SeriesView) -> list[SeriesView]:
     return lineage
 
 
-def search_library(database: Path, query: str, *, limit: int = 100) -> list[dict[str, object]]:
+def search_library(database: Path, query: str, *, limit: int = 100, access: AccessPolicy | None = None) -> list[dict[str, object]]:
     query = query.strip()
     if not query:
         return []
@@ -151,10 +152,15 @@ def search_library(database: Path, query: str, *, limit: int = 100) -> list[dict
     results: list[dict[str, object]] = []
 
     with connect_database(database, row_factory=True) as db:
+        if access is not None:
+            access.register_sql(db)
+        else:
+            for name, count in (("can_view_author", 1), ("can_view_series", 1), ("can_view_issue", 1), ("can_view_group", 2)):
+                db.create_function(name, count, lambda *args: True)
         for row in db.execute(
             """SELECT id, name
                FROM authors
-               WHERE name LIKE ? COLLATE NOCASE
+               WHERE name LIKE ? COLLATE NOCASE AND can_view_author(id)
                ORDER BY CASE WHEN name = ? COLLATE NOCASE THEN 0 ELSE 1 END,
                         name COLLATE NOCASE
                LIMIT ?""",
@@ -166,7 +172,7 @@ def search_library(database: Path, query: str, *, limit: int = 100) -> list[dict
             """SELECT s.id, s.title, a.name AS author_name
                FROM series s
                JOIN authors a ON a.id = s.author_id
-               WHERE s.title LIKE ? COLLATE NOCASE
+               WHERE s.title LIKE ? COLLATE NOCASE AND can_view_series(s.id)
                ORDER BY CASE WHEN s.title = ? COLLATE NOCASE THEN 0 ELSE 1 END,
                         a.name COLLATE NOCASE, s.title COLLATE NOCASE
                LIMIT ?""",
@@ -180,8 +186,9 @@ def search_library(database: Path, query: str, *, limit: int = 100) -> list[dict
                FROM issues i
                JOIN series s ON s.id = i.series_id
                JOIN authors a ON a.id = s.author_id
-               WHERE COALESCE(i.issue_number, '') LIKE ? COLLATE NOCASE
-                  OR COALESCE(i.title, '') LIKE ? COLLATE NOCASE
+               WHERE (COALESCE(i.issue_number, '') LIKE ? COLLATE NOCASE
+                  OR COALESCE(i.title, '') LIKE ? COLLATE NOCASE)
+                 AND can_view_issue(i.id)
                ORDER BY a.name COLLATE NOCASE, s.title COLLATE NOCASE,
                         COALESCE(i.issue_number, i.title, i.source_key) COLLATE NOCASE
                LIMIT ?""",
@@ -211,6 +218,7 @@ def search_library(database: Path, query: str, *, limit: int = 100) -> list[dict
                JOIN authors a ON a.id = s.author_id
                LEFT JOIN issues i ON i.id = g.issue_id
                WHERE g.role != 'primary'
+                 AND can_view_group(g.series_id, g.issue_id)
                  AND g.name LIKE ? COLLATE NOCASE
                ORDER BY a.name COLLATE NOCASE, s.title COLLATE NOCASE, g.name COLLATE NOCASE
                LIMIT ?""",

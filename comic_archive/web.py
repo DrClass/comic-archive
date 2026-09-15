@@ -36,6 +36,8 @@ from .routes.library import register_library_routes
 from .routes.editing import register_editing_routes
 from .routes.maintenance import register_maintenance_routes
 from .routes.media import register_media_routes
+from .routes.permissions import register_permission_routes
+from .permissions import initialize_permissions_database
 from .routes.import_uploads import ImportUploadRouteDeps, register_import_upload_routes
 from .routes.import_review import ImportReviewRouteDeps, register_import_review_routes
 from .routes.import_workspace import ImportWorkspaceRouteDeps, register_import_workspace_routes
@@ -121,6 +123,7 @@ def create_app(
     )
     database = initialize_database(database_path)
     initialize_auth_database(database)
+    initialize_permissions_database(database)
     library = Path(library_root).expanduser().resolve()
     staging = Path(staging_root).expanduser().resolve()
     imports = database.parent if import_root is None else Path(import_root).expanduser().resolve()
@@ -194,6 +197,8 @@ def create_app(
         if admin_only and not user.is_admin:
             return HTMLResponse("Administrator access required", status_code=403)
         response = await call_next(request)
+        # Account-specific content must be checked again after permission changes.
+        response.headers["Cache-Control"] = "private, no-store"
         # Import workspace state is durable, not merely in-process. Persist
         # after handling the request so mutations made by autosave, drag/drop,
         # role changes, group edits, and bulk progress are captured immediately.
@@ -219,6 +224,7 @@ def create_app(
     register_maintenance_routes(app, templates, database, library)
 
     register_media_routes(app, database, library)
+    register_permission_routes(app, templates, database)
 
     register_import_upload_routes(
         app,

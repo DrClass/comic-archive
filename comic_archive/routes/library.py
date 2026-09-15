@@ -25,12 +25,25 @@ from ..library_views import (
 from ..maintenance import series_gaps
 from ..progress import get_continue_reading, get_progress, get_progress_map, reset_progress, save_progress
 from ..web_forms import form_data
+from ..permissions import AccessPolicy
 
 
 def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: Path) -> None:
+    def policy(request: Request) -> AccessPolicy:
+        if not hasattr(request.state, "comic_access"):
+            request.state.comic_access = AccessPolicy(database, request.state.user)
+        return request.state.comic_access
+
+    def visible_library(request: Request):
+        return read_library(database, access=policy(request))
+
+    def require_issue(request: Request, issue_id: str) -> None:
+        if not policy(request).issue(issue_id):
+            raise HTTPException(status_code=404, detail="Issue not found")
+
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        authors = read_library(database)
+        authors = visible_library(request)
         series_count = sum(author.total_series for author in authors)
         issue_count = sum(series.total_issues for author in authors for series in author.series)
         return templates.TemplateResponse(
@@ -41,19 +54,19 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
                 "series_count": series_count,
                 "issue_count": issue_count,
                 "author_previews": author_preview_map(authors),
-                "continue_reading": get_continue_reading(database, request.state.user.id),
+                "continue_reading": get_continue_reading(database, request.state.user.id, access=policy(request)),
             },
         )
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = ""):
         query = q.strip()
-        results = search_library(database, query) if query else []
+        results = search_library(database, query, access=policy(request)) if query else []
         return templates.TemplateResponse(request=request, name="search.html", context={"query": query, "results": results})
 
     @app.get("/authors/{author_id}", response_class=HTMLResponse)
     def author_page(request: Request, author_id: str):
-        authors = read_library(database)
+        authors = visible_library(request)
         author = find_author(authors, author_id)
         if author is None:
             raise HTTPException(status_code=404, detail="Author not found")
@@ -71,7 +84,7 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
 
     @app.get("/series/{series_id}", response_class=HTMLResponse)
     def series_page(request: Request, series_id: str):
-        authors = read_library(database)
+        authors = visible_library(request)
         found = find_series(authors, series_id)
         if found is None:
             raise HTTPException(status_code=404, detail="Series not found")
@@ -88,13 +101,14 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
                 "lineage": series_lineage(author, series),
                 "progress": progress,
                 "series_status": series_status_map(author, progress),
-                "missing_gaps": series_gaps(database, series.id),
+                # Gaps computed from hidden issues can disclose their numbers.
+                "missing_gaps": series_gaps(database, series.id) if series.id not in policy(request).partially_hidden_series else [],
             },
         )
 
     @app.get("/issues/{issue_id}", response_class=HTMLResponse)
     def issue_page(request: Request, issue_id: str):
-        authors = read_library(database)
+        authors = visible_library(request)
         found = find_issue(authors, issue_id)
         if found is None:
             raise HTTPException(status_code=404, detail="Issue not found")
@@ -115,7 +129,7 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
 
     @app.get("/groups/{group_id}", response_class=HTMLResponse)
     def group_page(request: Request, group_id: str):
-        authors = read_library(database)
+        authors = visible_library(request)
         found = find_group(authors, group_id)
         if found is None:
             raise HTTPException(status_code=404, detail="Content group not found")
@@ -169,7 +183,7 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
 
     @app.get("/read/{issue_id}", response_class=HTMLResponse)
     def reader(request: Request, issue_id: str, page: int | None = None):
-        authors = read_library(database)
+        authors = visible_library(request)
         found = find_issue(authors, issue_id)
         if found is None:
             raise HTTPException(status_code=404, detail="Issue not found")
@@ -184,7 +198,7 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
 
     @app.get("/read-group/{group_id}", response_class=HTMLResponse)
     def group_reader(request: Request, group_id: str, page: int = 1):
-        authors = read_library(database)
+        authors = visible_library(request)
         found = find_group(authors, group_id)
         if found is None:
             raise HTTPException(status_code=404, detail="Content group not found")
@@ -194,6 +208,7 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
     @app.post("/progress/{issue_id}")
     async def progress_save(request: Request, issue_id: str):
         form = await form_data(request)
+        require_issue(request, issue_id)
         try:
             page = int(form.get("page", "1"))
             total_pages = int(form.get("total_pages", "1"))
@@ -205,5 +220,6 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
     @app.post("/progress/{issue_id}/reset")
     async def progress_reset(request: Request, issue_id: str):
         await form_data(request)
+        require_issue(request, issue_id)
         reset_progress(database, request.state.user.id, issue_id)
         return RedirectResponse(f"/issues/{issue_id}", status_code=303)

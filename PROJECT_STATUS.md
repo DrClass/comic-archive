@@ -1,5 +1,38 @@
 # PROJECT_STATUS.md — Comic Archive Current Handoff
 
+## Comic permissions implementation (2026-09-15; not executed or tested)
+
+- Added default-open restrictions for individual series and issues. Administrators
+  use the Permissions link on the series/issue detail page to select allowed users.
+  No selected users means administrators only. Administrators always retain access.
+- Every ancestor restriction applies to descendants; a child/issue allowlist can
+  narrow access but cannot override a parent restriction. Extras follow their owner.
+  New users receive access to unrestricted comics only. Disabled accounts still
+  cannot sign in; their saved selections apply if the account is re-enabled.
+- Browse counts/previews, search and Continue reading omit inaccessible content.
+  Reader, group, media, thumbnail and progress routes enforce restrictions. Denied
+  content returns 404. Progress is preserved when access is revoked.
+- Approved additive schema initialization creates four permission tables at app
+  startup, after main/auth initialization. Existing comics remain unrestricted.
+  No dependency change, source-file changes or migration execution was performed.
+- Permission replacements are transactional and audited with the administrator ID.
+  Inheritance follows the current hierarchy, including after admin moves/reparenting.
+- Authenticated responses now use private/no-store caching. This cannot recall
+  files already downloaded, previously cached thumbnails from older builds, or
+  content already displayed/in flight when a restriction changes.
+- Missing-number reports are omitted for readers on series with hidden issues to
+  avoid deriving details from inaccessible issues. Unrestricted series metadata
+  remains visible when only an individual issue is restricted.
+- Added tests/test_permissions.py for defaults, inheritance, direct URLs, search
+  limits, progress, administrative protection, migration persistence and caching.
+  No application, tests, discovery, compilation, benchmarks or validation commands
+  were run, as requested. The implementation is unverified.
+
+Suggested user-run checks: `python -B -m pytest -q -p no:cacheprovider tests/test_permissions.py`
+then the existing web/library/editing/nested-series tests and full suite. Manually
+check permission forms in separate administrator/allowed/denied browser sessions,
+including inherited restrictions, revocation, search, thumbnails and MP4 playback.
+
 ## PDF fallback multiprocessing update (2026-09-15)
 
 Authoritative baseline: the latest `comic-archive-main.zip` attached to the

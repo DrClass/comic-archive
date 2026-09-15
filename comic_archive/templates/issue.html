@@ -21,7 +21,7 @@
       {% endif %}
     </p>
   </div>
-  {% if request.state.user.is_admin %}<a class="admin-link" href="/issues/{{ issue.id }}/edit">Edit issue</a>{% endif %}
+  {% if request.state.user.is_admin %}<a class="admin-link" href="/issues/{{ issue.id }}/edit">Edit issue</a> <a class="admin-link" href="/admin/permissions/issue/{{ issue.id }}">Permissions</a>{% endif %}
 </div>
 
 {% if primary and primary.media %}

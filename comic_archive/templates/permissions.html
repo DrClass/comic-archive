@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Permissions — {{ comic_title }}{% endblock %}
+{% block content %}
+<p><a href="{{ back_url }}">← Back to comic</a></p>
+<h1>Permissions: {{ comic_title }}</h1>
+{% if error %}<p role="alert">{{ error }}</p>{% elif request.query_params.get('saved') == '1' %}<p role="status">Permissions saved.</p>{% endif %}
+<p>Administrators always have access. Restrictions on parent series still apply. Selecting a user here cannot override a parent restriction.</p>
+{% if kind == 'series' %}<p>This setting covers this series, all child series, issues, and extras. Child series and issues can restrict access further.</p>{% else %}<p>This setting covers this issue and all its pages and extras.</p>{% endif %}
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ request.session.get('csrf_token', '') }}">
+  <fieldset>
+    <legend>Who can access this {{ kind }}?</legend>
+    <p><label><input type="radio" name="access" value="all" {% if not restriction.restricted %}checked{% endif %}> All users, subject to parent restrictions (default)</label></p>
+    <p><label><input type="radio" name="access" value="selected" {% if restriction.restricted %}checked{% endif %}> Only selected users and administrators</label></p>
+  </fieldset>
+  <fieldset>
+    <legend>Allowed users when restricted</legend>
+    <p>Selecting nobody makes this comic accessible only to administrators. New users are not automatically added to restricted comics.</p>
+    {% for user in users %}
+    <p><label><input type="checkbox" name="user_{{ user.id }}" value="yes" {% if user.id in restriction.users %}checked{% endif %}> {{ user.username }}{% if user.is_admin %} (administrator — always has access){% endif %}{% if not user.active %} (disabled account){% endif %}</label></p>
+    {% endfor %}
+  </fieldset>
+  <button type="submit">Save permissions</button>
+</form>
+{% endblock %}

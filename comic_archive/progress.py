@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .database import connect_database
+from .permissions import AccessPolicy
 
 
 @dataclass(slots=True)
@@ -79,8 +80,9 @@ def reset_progress(database_path: str | Path, user_id: str, issue_id: str) -> No
         db.execute("DELETE FROM reading_progress WHERE user_id = ? AND issue_id = ?", (user_id, issue_id))
 
 
-def get_continue_reading(database_path: str | Path, user_id: str, *, limit: int = 8) -> list[dict[str, object]]:
+def get_continue_reading(database_path: str | Path, user_id: str, *, limit: int = 8, access: AccessPolicy | None = None) -> list[dict[str, object]]:
     with connect_database(database_path) as db:
+        db.create_function("can_view_issue", 1, access.issue if access is not None else lambda target_id: True)
         db.row_factory = sqlite3.Row
         rows = db.execute(
             """SELECT rp.issue_id, rp.page, rp.updated_at,
@@ -91,6 +93,7 @@ def get_continue_reading(database_path: str | Path, user_id: str, *, limit: int 
                JOIN series s ON s.id = i.series_id
                JOIN authors a ON a.id = s.author_id
                WHERE rp.user_id = ? AND rp.completed = 0
+                 AND can_view_issue(i.id)
                ORDER BY rp.updated_at DESC
                LIMIT ?""",
             (user_id, limit),
