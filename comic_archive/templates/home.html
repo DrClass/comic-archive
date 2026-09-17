@@ -24,7 +24,7 @@
   <a class="media-card" href="/authors/{{ author.id }}">
     <div class="media-card-image">
       {% set preview = author_previews.get(author.id) %}
-      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
+      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% elif not access.author(author.id) %}<img src="/assets/no-permission" loading="lazy" alt="Restricted comics">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
     </div>
     <div class="media-card-body">
       <h2>{{ author.name }}</h2>

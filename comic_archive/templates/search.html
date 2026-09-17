@@ -15,14 +15,14 @@
     <p class="muted">{{ results|length }} result{% if results|length != 1 %}s{% endif %} for “{{ query }}”</p>
     <div class="search-results">
     {% for result in results %}
-      <a class="search-result" href="{{ result.url }}">
+      {% if result.restricted %}<div class="search-result restricted-card">{% else %}<a class="search-result" href="{{ result.url }}">{% endif %}
         <span class="search-result-type">{{ result.type }}</span>
         <span class="search-result-main">
           <strong>{{ result.title }}</strong>
           {% if result.context %}<span class="muted">{{ result.context }}</span>{% endif %}
         </span>
-        <span aria-hidden="true">→</span>
-      </a>
+        {% if result.restricted %}<span><img class="restricted-search-preview" src="/assets/no-permission" loading="lazy" alt=""><span>Restricted — no access</span></span>{% else %}<span aria-hidden="true">→</span>{% endif %}
+      {% if result.restricted %}</div>{% else %}</a>{% endif %}
     {% endfor %}
     </div>
   {% else %}

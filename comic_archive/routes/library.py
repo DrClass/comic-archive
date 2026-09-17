@@ -43,7 +43,7 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        authors = visible_library(request)
+        authors = read_library(database)
         series_count = sum(author.total_series for author in authors)
         issue_count = sum(series.total_issues for author in authors for series in author.series)
         return templates.TemplateResponse(
@@ -53,7 +53,8 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
                 "authors": authors,
                 "series_count": series_count,
                 "issue_count": issue_count,
-                "author_previews": author_preview_map(authors),
+                "access": policy(request),
+                "author_previews": author_preview_map(authors, access=policy(request)),
                 "continue_reading": get_continue_reading(database, request.state.user.id, access=policy(request)),
             },
         )
@@ -61,12 +62,12 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = ""):
         query = q.strip()
-        results = search_library(database, query, access=policy(request)) if query else []
+        results = search_library(database, query, access=policy(request), include_restricted=True) if query else []
         return templates.TemplateResponse(request=request, name="search.html", context={"query": query, "results": results})
 
     @app.get("/authors/{author_id}", response_class=HTMLResponse)
     def author_page(request: Request, author_id: str):
-        authors = visible_library(request)
+        authors = read_library(database)
         author = find_author(authors, author_id)
         if author is None:
             raise HTTPException(status_code=404, detail="Author not found")
@@ -77,14 +78,17 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
             name="author.html",
             context={
                 "author": author,
-                "series_previews": series_preview_map(author),
+                "access": policy(request),
+                "series_previews": series_preview_map(author, access=policy(request)),
                 "series_status": series_status_map(author, progress),
             },
         )
 
     @app.get("/series/{series_id}", response_class=HTMLResponse)
     def series_page(request: Request, series_id: str):
-        authors = visible_library(request)
+        if not policy(request).series(series_id):
+            raise HTTPException(status_code=404, detail="Series not found")
+        authors = read_library(database)
         found = find_series(authors, series_id)
         if found is None:
             raise HTTPException(status_code=404, detail="Series not found")
@@ -96,8 +100,9 @@ def register_library_routes(app: FastAPI, templates: Jinja2Templates, database: 
             context={
                 "author": author,
                 "series": series,
-                "issue_previews": issue_preview_map(series),
-                "series_previews": series_preview_map(author),
+                "access": policy(request),
+                "issue_previews": issue_preview_map(series, access=policy(request)),
+                "series_previews": series_preview_map(author, access=policy(request)),
                 "lineage": series_lineage(author, series),
                 "progress": progress,
                 "series_status": series_status_map(author, progress),

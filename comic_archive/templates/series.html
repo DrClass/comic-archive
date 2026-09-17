@@ -16,13 +16,15 @@
 <h2>Sub-series</h2>
 <div class="card-grid">
 {% for child in series.children %}
-  <a class="media-card" href="/series/{{ child.id }}">
+  {% set restricted = not access.series(child.id) %}
+  {% if restricted %}<div class="media-card restricted-card">{% else %}<a class="media-card" href="/series/{{ child.id }}">{% endif %}
     <div class="media-card-image">
       {% set preview = series_previews.get(child.id) %}
-      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
+      {% if restricted %}<img src="/assets/no-permission" loading="lazy" alt="Restricted comic">{% elif preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
     </div>
     <div class="media-card-body">
       <h3>{{ child.title }}</h3>
+      {% if restricted %}<p class="reading-status">Restricted — no access</p>{% endif %}
       <p class="muted">{{ child.total_issues }} issue{% if child.total_issues != 1 %}s{% endif %}</p>
       <p class="card-badges">
         {% set status = series_status.get(child.id, 'unread') %}
@@ -32,7 +34,7 @@
       {% if child.effective_updated_at %}<p class="card-modified">Modified {{ child.effective_updated_at[:10] }}</p>{% endif %}
       <p class="muted">{{ child.total_pages }} page{% if child.total_pages != 1 %}s{% endif %}{% if child.total_extras %} + {{ child.total_extras }} extra{% if child.total_extras != 1 %}s{% endif %}{% endif %}</p>
     </div>
-  </a>
+  {% if restricted %}</div>{% else %}</a>{% endif %}
 {% endfor %}
 </div>
 {% endif %}
@@ -90,14 +92,16 @@
 <h2>Issues</h2>
 <div class="card-grid">
 {% for issue in series.issues %}
-  <a class="media-card" href="/issues/{{ issue.id }}">
+  {% set restricted = not access.issue(issue.id) %}
+  {% if restricted %}<div class="media-card restricted-card">{% else %}<a class="media-card" href="/issues/{{ issue.id }}">{% endif %}
     <div class="media-card-image">
       {% set preview = issue_previews.get(issue.id) %}
-      {% if preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
+      {% if restricted %}<img src="/assets/no-permission" loading="lazy" alt="Restricted comic">{% elif preview %}<img src="/thumbnail/{{ preview.id }}" loading="lazy" alt="">{% else %}<div class="card-placeholder">No preview</div>{% endif %}
     </div>
     <div class="media-card-body">
       <h3>{% if issue.issue_number %}{{ issue.issue_number }}{% elif issue.title %}{{ issue.title }}{% else %}One-shot{% endif %}</h3>
       {% if issue.title and issue.issue_number %}<p>{{ issue.title }}</p>{% endif %}
+      {% if restricted %}<p class="reading-status">Restricted — no access</p>{% endif %}
       {% set saved = progress.get(issue.id) %}
       <p class="card-badges">
         {% if saved and saved.completed %}<span class="reading-status finished">Finished</span>{% elif saved %}<span class="reading-status in-progress">In progress · page {{ saved.page }}</span>{% else %}<span class="reading-status unread">Unread</span>{% endif %}
@@ -110,7 +114,7 @@
       {% if ns.extra_count %}<p class="muted">{{ ns.extra_count }} extra{% if ns.extra_count != 1 %}s{% endif %}</p>{% endif %}
       {% if issue.updated_at %}<p class="card-modified">Modified {{ issue.updated_at[:10] }}</p>{% endif %}
     </div>
-  </a>
+  {% if restricted %}</div>{% else %}</a>{% endif %}
 {% endfor %}
 </div>
 {% endif %}

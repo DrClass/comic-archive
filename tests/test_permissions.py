@@ -95,7 +95,7 @@ def test_defaults_admin_ui_and_restriction_round_trip(archive):
 
 
 @pytest.mark.parametrize("path", [
-    "/authors/artist", "/series/root", "/series/child", "/issues/root-issue", "/issues/child-issue",
+    "/series/root", "/series/child", "/issues/root-issue", "/issues/child-issue",
     "/read/child-issue", "/groups/child-pages", "/groups/child-extra", "/groups/root-series-extra",
     "/read-group/child-extra", "/read-group/root-series-extra", "/read-group/child-pages",
     "/media/child-pages", "/media/child-extra", "/media/root-series-extra",
@@ -110,16 +110,27 @@ def test_inherited_restrictions_protect_direct_urls(archive, path):
     assert clients["denied"].get("/read/public-issue").status_code == 200
 
 
-def test_search_counts_previews_and_continue_reading_do_not_leak(archive):
+def test_catalog_shows_restricted_metadata_without_links_or_comic_previews(archive):
     database, users, clients = archive
     save_progress(database, users["denied"].id, "child-issue", 1, 2)
     save_progress(database, users["denied"].id, "public-issue", 1, 2)
     restrict(archive)
     home = clients["denied"].get("/")
-    assert "Secret Artist" not in home.text
+    assert "Secret Artist" in home.text
     assert "Secret Child" not in home.text
     assert "/thumbnail/root-pages" not in home.text
-    assert "1 authors" in home.text
+    assert "2 authors" in home.text
+    assert "3 series" in home.text
+    assert "3 issues" in home.text
+    author = clients["denied"].get("/authors/artist")
+    assert author.status_code == 200
+    assert "Secret Root" in author.text
+    assert "2 pages" in author.text
+    assert "Restricted — no access" in author.text
+    assert 'src="/assets/no-permission"' in author.text
+    assert 'href="/series/root"' not in author.text
+    assert '/thumbnail/root-pages' not in author.text
+    assert '/thumbnail/child-pages' not in author.text
     access = AccessPolicy(database, users["denied"])
     assert search_library(database, "Secret", access=access) == []
     assert search_library(database, "child", access=access) == []
@@ -129,6 +140,11 @@ def test_search_counts_previews_and_continue_reading_do_not_leak(archive):
     assert [row["issue_id"] for row in get_continue_reading(database, users["denied"].id, limit=1, access=access)] == ["public-issue"]
     assert read_library(database, access=access)[0].total_series == 1
     search = clients["denied"].get("/search?q=child").text
+    assert "Secret Child" in search
+    assert "child Issue" in search
+    assert "child-extra" in search
+    assert 'src="/assets/no-permission"' in search
+    assert 'href="/series/child"' not in search
     assert 'href="/issues/child-issue"' not in search
     assert 'href="/groups/child-extra"' not in search
 
@@ -142,7 +158,12 @@ def test_issue_can_narrow_but_cannot_override_parent_and_revocation_preserves_pr
     assert clients["denied"].get("/issues/child-issue").status_code == 404
     assert clients["allowed"].get("/media/child-extra").status_code == 404
     assert clients["allowed"].get("/media/child-series-extra").status_code == 200
-    assert "child-issue" not in clients["allowed"].get("/series/child").text
+    card = clients["allowed"].get("/series/child").text
+    assert "child Issue" in card
+    assert "1 page" in card
+    assert 'src="/assets/no-permission"' in card
+    assert 'href="/issues/child-issue"' not in card
+    assert '/thumbnail/child-pages' not in card
     save_progress(database, users["allowed"].id, "child-issue", 1, 2)
     client = clients["allowed"]
     assert post(client, "/progress/child-issue", {"page": "2", "total_pages": "2"}).status_code == 404
@@ -194,3 +215,55 @@ def test_media_range_and_cache_headers_recheck_after_revocation(archive):
     restrict(archive)
     for path in ("/media/root-pages", "/thumbnail/root-pages"):
         assert client.get(path, headers={"Range": "bytes=0-9"}).status_code == 404
+
+
+def test_restricted_child_cards_keep_counts_and_parent_previews_skip_locked_content(archive):
+    _, _, clients = archive
+    restrict(archive, "series", "child", ())
+    restrict(archive, "issue", "root-issue", ())
+    denied = clients["denied"]
+    page = denied.get("/series/root")
+    assert page.status_code == 200
+    assert "Secret Child" in page.text and "root Issue" in page.text
+    assert 'href="/series/child"' not in page.text
+    assert 'href="/issues/root-issue"' not in page.text
+    assert page.text.count('src="/assets/no-permission"') == 2
+    for url in ("/", "/authors/artist", "/series/root"):
+        html = denied.get(url).text
+        assert '/thumbnail/root-pages' not in html
+        assert '/thumbnail/child-pages' not in html
+    # Access is still default-open on the parent and unrelated comics.
+    author = denied.get("/authors/artist").text
+    assert 'href="/series/root"' in author
+    admin = clients["admin"].get("/series/root").text
+    assert 'href="/series/child"' in admin
+    assert 'href="/issues/root-issue"' in admin
+    assert '/thumbnail/child-pages' in admin
+    assert '/thumbnail/root-pages' in admin
+
+
+@pytest.mark.parametrize("image_format, mime_type", [("PNG", "image/png"), ("JPEG", "image/jpeg")])
+def test_placeholder_serves_actual_format_and_requires_login(archive, tmp_path, monkeypatch, image_format, mime_type):
+    from comic_archive.routes import media
+
+    _, _, clients = archive
+    placeholder = tmp_path / "no-permission.jpg"
+    Image.new("RGB", (300, 300), "gray").save(placeholder, format=image_format)
+    monkeypatch.setattr(media, "_NO_PERMISSION_IMAGE", placeholder)
+    response = clients["denied"].get("/assets/no-permission")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == mime_type
+    assert response.content == placeholder.read_bytes()
+    with TestClient(clients["denied"].app) as anonymous:
+        assert anonymous.get("/assets/no-permission", follow_redirects=False).status_code == 303
+
+
+def test_placeholder_has_safe_fallback_when_user_image_is_not_present(archive, tmp_path, monkeypatch):
+    from comic_archive.routes import media
+
+    _, _, clients = archive
+    monkeypatch.setattr(media, "_NO_PERMISSION_IMAGE", tmp_path / "not-added-yet.jpg")
+    response = clients["denied"].get("/assets/no-permission")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert "Restricted" in response.text

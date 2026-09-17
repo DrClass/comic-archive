@@ -65,20 +65,26 @@ def first_image_media(issue: IssueView) -> MediaView | None:
     return next((media for media in primary.media if media.mime_type.startswith("image/")), None)
 
 
-def issue_preview_map(series: SeriesView) -> dict[str, MediaView]:
+def issue_preview_map(series: SeriesView, *, access: AccessPolicy | None = None) -> dict[str, MediaView]:
     previews: dict[str, MediaView] = {}
     for issue in series.issues:
+        if access is not None and not access.issue(issue.id):
+            continue
         media = first_image_media(issue)
         if media is not None:
             previews[issue.id] = media
     return previews
 
 
-def series_preview_map(author: AuthorView) -> dict[str, MediaView]:
+def series_preview_map(author: AuthorView, *, access: AccessPolicy | None = None) -> dict[str, MediaView]:
     previews: dict[str, MediaView] = {}
 
     def first_preview(series: SeriesView) -> MediaView | None:
+        if access is not None and not access.series(series.id):
+            return None
         for issue in series.issues:
+            if access is not None and not access.issue(issue.id):
+                continue
             media = first_image_media(issue)
             if media is not None:
                 return media
@@ -118,10 +124,10 @@ def series_status_map(author: AuthorView, progress: dict[str, object]) -> dict[s
     return {series.id: series_reading_status(series, progress) for series in walk_series(author.series)}
 
 
-def author_preview_map(authors: list[AuthorView]) -> dict[str, MediaView]:
+def author_preview_map(authors: list[AuthorView], *, access: AccessPolicy | None = None) -> dict[str, MediaView]:
     previews: dict[str, MediaView] = {}
     for author in authors:
-        series_previews = series_preview_map(author)
+        series_previews = series_preview_map(author, access=access)
         for series in author.series:
             media = series_previews.get(series.id)
             if media is not None:
@@ -143,7 +149,7 @@ def series_lineage(author: AuthorView, series: SeriesView) -> list[SeriesView]:
     return lineage
 
 
-def search_library(database: Path, query: str, *, limit: int = 100, access: AccessPolicy | None = None) -> list[dict[str, object]]:
+def search_library(database: Path, query: str, *, limit: int = 100, access: AccessPolicy | None = None, include_restricted: bool = False) -> list[dict[str, object]]:
     query = query.strip()
     if not query:
         return []
@@ -152,7 +158,7 @@ def search_library(database: Path, query: str, *, limit: int = 100, access: Acce
     results: list[dict[str, object]] = []
 
     with connect_database(database, row_factory=True) as db:
-        if access is not None:
+        if access is not None and not include_restricted:
             access.register_sql(db)
         else:
             for name, count in (("can_view_author", 1), ("can_view_series", 1), ("can_view_issue", 1), ("can_view_group", 2)):
@@ -178,7 +184,7 @@ def search_library(database: Path, query: str, *, limit: int = 100, access: Acce
                LIMIT ?""",
             (pattern, query, limit),
         ):
-            results.append({"type": "Series", "title": row["title"], "context": row["author_name"], "url": f"/series/{row['id']}"})
+            results.append({"type": "Series", "title": row["title"], "context": row["author_name"], "url": f"/series/{row['id']}", "restricted": access is not None and not access.series(row["id"])})
 
         for row in db.execute(
             """SELECT i.id, i.issue_number, i.title AS issue_title,
@@ -207,10 +213,11 @@ def search_library(database: Path, query: str, *, limit: int = 100, access: Acce
                 "title": title,
                 "context": f"{row['author_name']} / {row['series_title']}",
                 "url": f"/issues/{row['id']}",
+                "restricted": access is not None and not access.issue(row["id"]),
             })
 
         for row in db.execute(
-            """SELECT g.id, g.name, g.issue_id, g.role,
+            """SELECT g.id, g.name, g.issue_id, g.role, g.series_id,
                       s.title AS series_title, a.name AS author_name,
                       i.issue_number, i.title AS issue_title
                FROM content_groups g
@@ -228,7 +235,7 @@ def search_library(database: Path, query: str, *, limit: int = 100, access: Acce
             if row["issue_id"]:
                 issue_label = row["issue_number"] or row["issue_title"] or "One-shot"
                 context += f" / {issue_label}"
-            results.append({"type": "Extra", "title": row["name"], "context": context, "url": f"/groups/{row['id']}"})
+            results.append({"type": "Extra", "title": row["name"], "context": context, "url": f"/groups/{row['id']}", "restricted": access is not None and not access.group(row["series_id"], row["issue_id"])})
 
     qfold = query.casefold()
     type_rank = {"Author": 0, "Series": 1, "Issue": 2, "Extra": 3}

@@ -1,5 +1,27 @@
 # PROJECT_STATUS.md — Comic Archive Current Handoff
 
+## Restricted comic catalog visibility (2026-09-17; not executed or tested)
+
+- Supersedes the metadata-hiding behavior described below: library/author listings
+  now include all comics and their full counts. Restricted series, child series and
+  issues show titles/stats, a Restricted label, and a placeholder instead of comic
+  artwork. Their cards have no link. Search includes restricted metadata with no
+  link as well. Authors remain navigable to let readers browse these catalog cards.
+- Preview selection excludes restricted issues and series even when selecting a
+  cover for an unrestricted ancestor/author. Direct restricted detail, reader,
+  group, media, thumbnail and progress routes remain protected. Continue reading
+  still includes only accessible issues.
+- Place the supplied 300x300 image at `comic_archive/no-permission.jpg`. The fixed,
+  authenticated `/assets/no-permission` endpoint recognizes PNG bytes despite the
+  .jpg filename (actual JPEG also works). A neutral Restricted SVG is returned if
+  the file is absent. No image was created or replaced by this implementation.
+- Modified library view helpers, library/media routes, home/author/series/search/
+  base templates, and permission regression tests. No schema/dependency change.
+- Application, tests and validation commands were not executed. Suggested user-run
+  tests: `tests/test_permissions.py` and `tests/test_web.py`. Manually check denied,
+  allowed and admin accounts, nested restrictions, counts, search, placeholder
+  display, keyboard navigation and direct URL denial.
+
 ## Comic permissions implementation (2026-09-15; not executed or tested)
 
 - Added default-open restrictions for individual series and issues. Administrators
