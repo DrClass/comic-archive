@@ -125,10 +125,17 @@ def test_webp_originals_and_thumbnail_rebuild(tmp_path: Path, animated: bool):
     first.paste((255, 0, 0, 255), (10, 10, 30, 50))
     options = {}
     if animated:
-        options = {"save_all": True, "append_images": [Image.new("RGBA", first.size, "blue")],
-                   "duration": [100, 100], "loop": 0}
+        # Use transparent frames and force keyframes so the local WebP encoder
+        # retains this small fixture's transparent first-frame border.
+        second = Image.new("RGBA", first.size, (0, 0, 0, 0))
+        second.paste((0, 0, 255, 255), (10, 10, 30, 50))
+        options = {"save_all": True, "append_images": [second],
+                   "duration": [100, 100], "loop": 0, "kmax": 1}
     first.save(page, format="WEBP", lossless=True, **options)
     original = page.read_bytes()
+    with Image.open(page) as decoded:
+        decoded.seek(0)
+        assert decoded.convert("RGBA").getpixel((2, 2))[3] == 0
     staged = build_staged_import(build_review_plan(scan_folder(source)), author="Artist", series="WebP")
     database, library = tmp_path / "db.sqlite3", tmp_path / "library"
     commit_staged_import(staged, library_root=library, database_path=database)
@@ -143,7 +150,8 @@ def test_webp_originals_and_thumbnail_rebuild(tmp_path: Path, animated: bool):
     with Image.open(thumb) as image:
         assert image.format == "JPEG"
         assert image.size == (40, 60)
-        assert all(channel > 240 for channel in image.getpixel((2, 2)))
+        corner = image.getpixel((2, 2))
+        assert all(channel > 240 for channel in corner), corner
         red, green, blue = image.getpixel((20, 30))
         assert red > 220 and green < 30 and blue < 30
     thumb.unlink()
