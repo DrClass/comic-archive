@@ -146,9 +146,14 @@ The scanner accepts:
 -   `.jpg`
 -   `.jpeg`
 -   `.png`
+-   `.webp`
 -   `.gif`
 -   `.mp4`
 -   `.pdf`
+
+WEBP originals (including transparency and animation) are copied unchanged and served
+as `image/webp`. Thumbnails are static JPEGs using the first frame, with transparency
+composited onto white, like other image formats. Extension matching is case-insensitive.
 
 PDF is an importer input format only. For simple image-only pages, the importer directly
 extracts embedded JPEG/PNG data without re-encoding when visual equivalence is safe.

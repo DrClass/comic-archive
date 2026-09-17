@@ -116,6 +116,44 @@ def test_commit_generates_thumbnail_and_backfill_is_idempotent(tmp_path: Path):
     assert thumb.is_file()
 
 
+@pytest.mark.parametrize("animated", [False, True])
+def test_webp_originals_and_thumbnail_rebuild(tmp_path: Path, animated: bool):
+    source = tmp_path / "source"
+    source.mkdir()
+    page = source / "001.WEBP"
+    first = Image.new("RGBA", (40, 60), (0, 0, 0, 0))
+    first.paste((255, 0, 0, 255), (10, 10, 30, 50))
+    options = {}
+    if animated:
+        options = {"save_all": True, "append_images": [Image.new("RGBA", first.size, "blue")],
+                   "duration": [100, 100], "loop": 0}
+    first.save(page, format="WEBP", lossless=True, **options)
+    original = page.read_bytes()
+    staged = build_staged_import(build_review_plan(scan_folder(source)), author="Artist", series="WebP")
+    database, library = tmp_path / "db.sqlite3", tmp_path / "library"
+    commit_staged_import(staged, library_root=library, database_path=database)
+    media = read_library(database)[0].series[0].issues[0].groups[0].media[0]
+    assert media.mime_type == "image/webp"
+    assert media.stored_path.endswith(".webp")
+    assert (library / media.stored_path).read_bytes() == original
+    assert page.read_bytes() == original
+    with Image.open(library / media.stored_path) as stored:
+        assert getattr(stored, "n_frames", 1) == (2 if animated else 1)
+    thumb = thumbnail_path_for_media(library, media.id, media.stored_path)
+    with Image.open(thumb) as image:
+        assert image.format == "JPEG"
+        assert image.size == (40, 60)
+        assert all(channel > 240 for channel in image.getpixel((2, 2)))
+        red, green, blue = image.getpixel((20, 30))
+        assert red > 220 and green < 30 and blue < 30
+    thumb.unlink()
+    rebuilt = build_missing_thumbnails(database, library)
+    assert (rebuilt.created, rebuilt.failed) == (1, 0)
+    thumb.unlink()
+    assert ensure_thumbnail(library, media_id=media.id, stored_path=media.stored_path,
+                            mime_type=media.mime_type) == thumb
+
+
 def test_jpeg_thumbnail_uses_decoder_downsampling(tmp_path: Path, monkeypatch):
     """Large JPEG pages should be downsampled by the decoder before resize."""
     from PIL import JpegImagePlugin

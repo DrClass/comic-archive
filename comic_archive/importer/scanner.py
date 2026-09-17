@@ -30,6 +30,7 @@ SUPPORTED_MEDIA: dict[str, tuple[MediaKind, str]] = {
     ".jpg": (MediaKind.IMAGE, "image/jpeg"),
     ".jpeg": (MediaKind.IMAGE, "image/jpeg"),
     ".png": (MediaKind.IMAGE, "image/png"),
+    ".webp": (MediaKind.IMAGE, "image/webp"),
     ".gif": (MediaKind.IMAGE, "image/gif"),
     ".mp4": (MediaKind.VIDEO, "video/mp4"),
     # PDF is an accepted importer input. Safe single-image pages preserve embedded

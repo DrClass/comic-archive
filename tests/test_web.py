@@ -131,6 +131,42 @@ def test_reader_and_media_serving(tmp_path: Path):
     assert response.headers["content-type"].startswith("image/jpeg")
 
 
+def test_webp_upload_workspace_commit_and_reader(tmp_path: Path):
+    from io import BytesIO
+    from comic_archive.services.workspace import _workspace_build_staged_import
+
+    buffer = BytesIO()
+    Image.new("RGB", (40, 60), "red").save(buffer, format="WEBP", lossless=True)
+    original = buffer.getvalue()
+    database, library = tmp_path / "archive.sqlite3", tmp_path / "library"
+    client = _admin_client(database, library)
+    upload_id = _create_browser_upload(client, mode="single", expected_files=1)
+    response = _send_browser_upload_file(client, upload_id, "WebP Comic/001.WEBP", original)
+    assert response.status_code == 200, response.text
+    finalized = _post(client, f"/import/upload-session/{upload_id}/finalize")
+    assert finalized.status_code == 200, finalized.text
+    redirect = finalized.json()["redirect"]
+    assert client.get(redirect).status_code == 200
+    session_id = redirect.split("/")[2]
+    session = client.app.state.import_sessions[session_id]
+    session.workspace_author = "Artist"
+    session.workspace_series = "WebP Comic"
+    staged = _workspace_build_staged_import(session)
+    result = commit_staged_import(staged, library_root=library, database_path=database)
+    media = read_library(database)[0].series[0].issues[0].groups[0].media[0]
+    response = client.get(f"/media/{media.id}")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/webp")
+    assert response.content == original
+    thumbnail = client.get(f"/thumbnail/{media.id}")
+    assert thumbnail.status_code == 200
+    assert thumbnail.headers["content-type"].startswith("image/jpeg")
+    reader = client.get(f"/read/{result.issue_ids[0]}")
+    assert reader.status_code == 200
+    assert f'/media/{media.id}' in reader.text
+    assert f'/thumbnail/{media.id}' in reader.text
+
+
 def test_reader_clamps_page_and_unknown_media_404(tmp_path: Path):
     database, library, result = _make_library(tmp_path)
     client = _admin_client(database, library)

@@ -113,7 +113,7 @@ Thumbnails: JPEG, max 320x480, quality 78; transparent images composite onto whi
 
 ## Supported import media
 
-Scanner extensions: `.jpg`, `.jpeg`, `.png`, `.gif`, `.mp4`, `.pdf`. Images/video map to media kinds. PDF is input-only: simple single-image pages can directly preserve embedded JPEG/PNG data when the image exactly represents the visible page; other pages are rendered by PyMuPDF to high-quality JPEG. The PDF itself is not committed as reader media. Source originals are untouched.
+Scanner extensions: `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.mp4`, `.pdf`. Images/video map to media kinds. WEBP uses `image/webp`; static and animated originals are copied unchanged and use the shared image reader and thumbnail paths. PDF is input-only: simple single-image pages can directly preserve embedded JPEG/PNG data when the image exactly represents the visible page; other pages are rendered by PyMuPDF to high-quality JPEG. The PDF itself is not committed as reader media. Source originals are untouched.
 
 ## Scanner
 

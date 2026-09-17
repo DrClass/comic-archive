@@ -12,6 +12,7 @@ _EXTENSION_PRIORITY = {
     ".jpg": 10,
     ".jpeg": 10,
     ".png": 10,
+    ".webp": 10,
     ".gif": 20,
     ".mp4": 30,
 }

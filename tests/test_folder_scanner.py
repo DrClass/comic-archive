@@ -51,6 +51,26 @@ def test_collapses_single_wrapper_directory(tmp_path: Path) -> None:
     assert [item.relative_path.name for item in result.primary.media] == ["001.jpg", "002.jpg"]
 
 
+def test_webp_scanning_order_extras_and_bulk_discovery(tmp_path: Path) -> None:
+    from comic_archive.importer.bulk import discover_artist_comics
+
+    comic = tmp_path / "Comic"
+    for name in ("10.webp", "2.WEBP", "2.gif", "2.mp4", "Covers/cover.WeBp"):
+        touch(comic / name)
+    result = scan_folder(comic)
+    assert result.primary is not None
+    assert [item.relative_path.name for item in result.primary.media] == [
+        "2.WEBP", "2.gif", "2.mp4", "10.webp",
+    ]
+    pages = [result.primary.media[0], result.primary.media[-1], result.extras[0].media[0]]
+    assert all(item.media_kind is MediaKind.IMAGE for item in pages)
+    assert all(item.mime_type == "image/webp" for item in pages)
+    assert result.extras[0].name == "Covers"
+    assert not result.ignored_files
+    _, candidates = discover_artist_comics(tmp_path)
+    assert [(item.name, item.media_count) for item in candidates] == [("Comic", 5)]
+
+
 def test_nested_extra_folders_stay_separate_groups(tmp_path: Path) -> None:
     touch(tmp_path / "001.jpg")
     touch(tmp_path / "Extras" / "Renders" / "1.png")

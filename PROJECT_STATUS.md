@@ -1,5 +1,20 @@
 # PROJECT_STATUS.md — Comic Archive Current Handoff
 
+## WEBP support (2026-09-17; not executed or tested)
+
+- Added case-insensitive WEBP recognition as image/webp in the shared importer
+  registry, covering folder scans, bulk discovery and workspace media detection.
+  WEBP shares JPEG/PNG sorting priority. Original bytes, transparency and animation
+  are preserved by the existing copy/serve paths; thumbnails use the existing
+  first-frame JPEG generation and white transparency background.
+- Added regression coverage for mixed-case names, ordering, extras, bulk discovery,
+  browser upload/workspace/commit/reader serving, animated and transparent originals,
+  and thumbnail generation/rebuild/on-demand recovery.
+- No dependency, schema or configuration changes. No application, tests or validation
+  commands were run. User-run checks: test_folder_scanner.py, test_thumbnails.py and
+  test_web.py; manually check WEBP-only and mixed imports, extras, both reader modes,
+  animation, transparency and thumbnail maintenance.
+
 ## Restricted comic catalog visibility (2026-09-17; not executed or tested)
 
 - Supersedes the metadata-hiding behavior described below: library/author listings
